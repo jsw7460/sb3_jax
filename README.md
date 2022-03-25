@@ -9,9 +9,10 @@ This library is based on Stable Baselines (https://github.com/DLR-RM/stable-base
 | **Name**       | **Online_learning** | `Box`          | `Discrete`     | `MultiDiscrete` | `MultiBinary`  | **Multi Processing**              |
 |----------------|---------------------| ------------------ | ------------------ | ------------------- | ------------------ | --------------------------------- |
 | SAC            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| CQL            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
+| CQL            | :x:                 | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
 | Multi-task SAC | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| Multi-task CQL | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
+| Multi-task CQL | :x:                 | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
+| TD3            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
 
 ### Windows 10
 

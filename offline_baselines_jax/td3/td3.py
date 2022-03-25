@@ -2,16 +2,91 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import gym
 import numpy as np
-import torch as th
-from torch.nn import functional as F
+import flax.linen as nn
+import jax.numpy as jnp
+import jax
+import optax
+import functools
 
-from stable_baselines3.common.buffers import ReplayBuffer
+from offline_baselines_jax.common.policies import Model
+from offline_baselines_jax.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
-from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
-from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
-from stable_baselines3.common.utils import polyak_update
-from stable_baselines3.td3.policies import TD3Policy
+from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
+from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
+from offline_baselines_jax.td3.policies import TD3Policy
 
+def td3_critic_update(key:Any, critic: Model, critic_target: Model, actor_target: Model,
+                      replay_data:ReplayBufferSamples, gamma:float, target_policy_noise: float, target_noise_clip: float):
+
+    # Select action according to policy and add clipped noise
+    noise = jax.random.normal(key) * target_policy_noise
+    noise = jnp.clip(noise, -target_noise_clip, target_noise_clip)
+    next_actions = jnp.clip((actor_target(replay_data.next_observations) + noise), -1, 1)
+
+    # Compute the next Q-values: min over all critics targets
+    next_q_values = critic_target(replay_data.next_observations, next_actions)
+    next_q_values = jnp.minimum(next_q_values[0], next_q_values[1])
+    target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
+
+    def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+        # Get current Q-values estimates for each critic network
+        current_q1, current_q2 = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+
+        # Compute critic loss
+        critic_loss = 0.5 * (jnp.mean(jnp.square(current_q1 - target_q_values)) + jnp.mean(jnp.square(current_q2 - target_q_values)))
+        return critic_loss, {'critic_loss': critic_loss, 'current_q1': current_q1.mean(), 'current_q2': current_q2.mean()}
+
+    new_critic, info = critic.apply_gradient(critic_loss_fn)
+    return new_critic, info
+
+
+def td3_actor_update(actor: Model, critic: Model, replay_data:ReplayBufferSamples, alpha: float, without_exploration: bool):
+    if without_exploration:
+        actions_pi = actor(replay_data.observations)
+        q1 = critic(replay_data.observations, actions_pi)[0]
+
+        coef_lambda = alpha / (jnp.mean(jnp.abs(q1)))
+
+    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
+        # Compute actor loss
+        actions_pi = actor.apply_fn({'params': actor_params}, replay_data.observations)
+        q_value = critic(replay_data.observations, actions_pi)[0].mean()
+
+        actor_loss = - q_value
+        if without_exploration:
+            bc_loss = jnp.mean(jnp.square(actions_pi - replay_data.actions))
+            actor_loss = coef_lambda * actor_loss + bc_loss
+
+        return actor_loss, {'actor_loss': actor_loss, 'q_value': q_value}
+
+    new_actor, info = actor.apply_gradient(actor_loss_fn)
+    return new_actor, info
+
+
+def target_update(model: Model, target: Model, tau: float) -> Model:
+    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), model.params, target.params)
+    return target.replace(params=new_target_params)
+
+
+@functools.partial(jax.jit, static_argnames=('gamma', 'tau', 'target_policy_noise', 'target_noise_clip', 'alpha',
+                                             'without_exploration', 'actor_update_cond'))
+def _update_jit(rng: int, actor: Model, critic: Model, actor_target: Model, critic_target: Model, replay_data: ReplayBufferSamples,
+                actor_update_cond: bool, tau: float, target_policy_noise: float, target_noise_clip: float, gamma: float, alpha: float, without_exploration: bool,
+                ) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
+
+    rng, key = jax.random.split(rng, 2)
+    new_critic, critic_info = td3_critic_update(key, critic, critic_target, actor_target, replay_data, gamma, target_policy_noise, target_noise_clip)
+
+    if actor_update_cond:
+        new_actor, actor_info = td3_actor_update(actor, new_critic, replay_data, alpha, without_exploration)
+        new_actor_target = target_update(new_actor, actor_target, tau)
+        new_critic_target = target_update(new_critic, critic_target, tau)
+    else:
+        new_actor, actor_info = actor, {'actor_loss': 0, 'q_value': 0}
+        new_actor_target = actor_target
+        new_critic_target = critic_target
+
+    return rng, new_actor, new_critic, new_actor_target, new_critic_target, {**critic_info, **actor_info}
 
 class TD3(OffPolicyAlgorithm):
     """
@@ -64,13 +139,13 @@ class TD3(OffPolicyAlgorithm):
         self,
         policy: Union[str, Type[TD3Policy]],
         env: Union[GymEnv, str],
-        learning_rate: Union[float, Schedule] = 1e-3,
+        learning_rate: Union[float, Schedule] = 1e-4,
         buffer_size: int = 1_000_000,  # 1e6
         learning_starts: int = 100,
         batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
-        train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
+        train_freq: Union[int, Tuple[int, str]] = (1, 'episode'),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
         replay_buffer_class: Optional[ReplayBuffer] = None,
@@ -83,15 +158,15 @@ class TD3(OffPolicyAlgorithm):
         create_eval_env: bool = False,
         policy_kwargs: Optional[Dict[str, Any]] = None,
         verbose: int = 0,
-        seed: Optional[int] = None,
-        device: Union[th.device, str] = "auto",
+        seed: int = 0,
+        alpha: int = 2.5,
         _init_setup_model: bool = True,
+        without_exploration: bool = False,
     ):
 
         super(TD3, self).__init__(
             policy,
             env,
-            TD3Policy,
             learning_rate,
             buffer_size,
             learning_starts,
@@ -106,15 +181,17 @@ class TD3(OffPolicyAlgorithm):
             policy_kwargs=policy_kwargs,
             tensorboard_log=tensorboard_log,
             verbose=verbose,
-            device=device,
             create_eval_env=create_eval_env,
             seed=seed,
-            sde_support=False,
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(gym.spaces.Box),
             support_multi_env=True,
+            without_exploration=without_exploration,
         )
+        if without_exploration:
+            self.gradient_steps = policy_delay
 
+        self.alpha = alpha
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
@@ -133,56 +210,29 @@ class TD3(OffPolicyAlgorithm):
         self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        # Switch to train mode (this affects batch norm / dropout)
-        self.policy.set_training_mode(True)
-
-        # Update learning rate according to lr schedule
-        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
-
         actor_losses, critic_losses = [], []
 
         for _ in range(gradient_steps):
-
             self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+            self.key, key = jax.random.split(self.key, 2)
 
-            with th.no_grad():
-                # Select action according to policy and add clipped noise
-                noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
-                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
-                next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+            actor_update_cond = self._n_updates % self.policy_delay == 0
 
-                # Compute the next Q-values: min over all critics targets
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+            self.key, new_actor, new_critic, new_actor_target, new_critic_target, info = \
+                _update_jit(key, self.actor, self.critic, self.actor_target, self.critic_target, replay_data,
+                            actor_update_cond, self.tau, self.target_policy_noise, self.target_noise_clip, self.gamma, self.alpha, self.without_exploration)
 
-            # Get current Q-values estimates for each critic network
-            current_q_values = self.critic(replay_data.observations, replay_data.actions)
+            self.policy.actor = new_actor
+            self.policy.critic = new_critic
+            self.policy.actor_target = new_actor_target
+            self.policy.critic_target = new_critic_target
 
-            # Compute critic loss
-            critic_loss = sum([F.mse_loss(current_q, target_q_values) for current_q in current_q_values])
-            critic_losses.append(critic_loss.item())
+            self._create_aliases()
+            actor_losses.append(info['actor_loss'])
+            critic_losses.append(info['critic_loss'])
 
-            # Optimize the critics
-            self.critic.optimizer.zero_grad()
-            critic_loss.backward()
-            self.critic.optimizer.step()
-
-            # Delayed policy updates
-            if self._n_updates % self.policy_delay == 0:
-                # Compute actor loss
-                actor_loss = -self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations)).mean()
-                actor_losses.append(actor_loss.item())
-
-                # Optimize the actor
-                self.actor.optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor.optimizer.step()
-
-                polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
-                polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
@@ -217,6 +267,13 @@ class TD3(OffPolicyAlgorithm):
     def _excluded_save_params(self) -> List[str]:
         return super(TD3, self)._excluded_save_params() + ["actor", "critic", "actor_target", "critic_target"]
 
-    def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
-        state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
-        return state_dicts, []
+    def _get_jax_save_params(self) -> Dict[str, Params]:
+        params_dict = {}
+        params_dict['actor'] = self.actor.params
+        params_dict['critic'] = self.critic.params
+        params_dict['critic_target'] = self.critic_target.params
+        params_dict['actor_target'] = self.actor_target.params
+        return params_dict
+
+    def _get_jax_load_params(self) -> List[str]:
+        return ['actor', 'critic', 'critic_target', 'actor_target']

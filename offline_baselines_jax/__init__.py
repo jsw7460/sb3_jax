@@ -5,8 +5,7 @@ from offline_baselines_jax.sac import SAC
 from offline_baselines_jax.mtsac import MTSAC
 from offline_baselines_jax.cql import CQL
 from offline_baselines_jax.mtcql import MTCQL
-
-# from stable_baselines3.td3 import TD3
+from offline_baselines_jax.td3 import TD3
 
 # Read version from file
 version_file = os.path.join(os.path.dirname(__file__), "version.txt")

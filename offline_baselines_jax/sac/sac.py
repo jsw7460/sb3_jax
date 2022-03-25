@@ -93,16 +93,16 @@ def _update_jit(
     rng: int, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples,
         gamma: float, target_entropy: float, tau: float, target_update_cond: bool, entropy_update: bool,
 ) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
-    rng, key = jax.random.split(rng)
+    rng, key = jax.random.split(rng, 2)
     new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, replay_data, gamma)
     if target_update_cond:
         new_critic_target = target_update(new_critic, critic_target, tau)
     else:
         new_critic_target = critic_target
 
-    rng, key = jax.random.split(rng)
+    rng, key = jax.random.split(rng, 2)
     new_actor, actor_info = sac_actor_update(key, actor, new_critic, log_ent_coef, replay_data)
-    rng, key = jax.random.split(rng)
+    rng, key = jax.random.split(rng, 2)
     if entropy_update:
         new_temp, ent_info = log_ent_coef_update(key, log_ent_coef, new_actor, target_entropy, replay_data)
     else:
@@ -193,6 +193,7 @@ class SAC(OffPolicyAlgorithm):
         verbose: int = 0,
         seed: int = 0,
         _init_setup_model: bool = True,
+        without_exploration: bool = False,
     ):
 
         super(SAC, self).__init__(
@@ -217,10 +218,11 @@ class SAC(OffPolicyAlgorithm):
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(gym.spaces.Box),
             support_multi_env=True,
+            without_exploration=without_exploration,
         )
 
         self.target_entropy = target_entropy
-        self.log_ent_coef = None  # type: Optional[th.Tensor]
+        self.log_ent_coef = None
         # Entropy coefficient / Entropy temperature
         # Inverse of the reward scale
         self.ent_coef = ent_coef

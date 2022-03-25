@@ -93,7 +93,7 @@ class MLP(nn.Module):
             if i + 1 < len(self.net_arch):
                 x = self.activation_fn(x)
         if self.squash_output:
-            x = nn.Tanh(x)
+            x = nn.tanh(x)
         return x
 
 def create_mlp(output_dim: int, net_arch: List[int], activation_fn: Type[nn.Module] = nn.relu,
