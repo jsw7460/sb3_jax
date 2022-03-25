@@ -25,7 +25,7 @@ python setup.py install
 ```
 
 ### Install using pip (not implemented)
-Install the Stable Baselines3 package:
+Install the offline baselines with jax package:
 ```
 pip install offline_baselines_jax
 ```
