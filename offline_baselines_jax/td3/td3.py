@@ -44,8 +44,9 @@ def td3_actor_update(actor: Model, critic: Model, replay_data:ReplayBufferSample
     if without_exploration:
         actions_pi = actor(replay_data.observations)
         q1 = critic(replay_data.observations, actions_pi)[0]
-
         coef_lambda = alpha / (jnp.mean(jnp.abs(q1)))
+    else:
+        coef_lambda = 1
 
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Compute actor loss
@@ -57,7 +58,7 @@ def td3_actor_update(actor: Model, critic: Model, replay_data:ReplayBufferSample
             bc_loss = jnp.mean(jnp.square(actions_pi - replay_data.actions))
             actor_loss = coef_lambda * actor_loss + bc_loss
 
-        return actor_loss, {'actor_loss': actor_loss, 'q_value': q_value}
+        return actor_loss, {'actor_loss': actor_loss, 'q_value': q_value, 'coef_lambda': coef_lambda}
 
     new_actor, info = actor.apply_gradient(actor_loss_fn)
     return new_actor, info
@@ -82,7 +83,7 @@ def _update_jit(rng: int, actor: Model, critic: Model, actor_target: Model, crit
         new_actor_target = target_update(new_actor, actor_target, tau)
         new_critic_target = target_update(new_critic, critic_target, tau)
     else:
-        new_actor, actor_info = actor, {'actor_loss': 0, 'q_value': 0}
+        new_actor, actor_info = actor, {'actor_loss': 0, 'q_value': 0, 'coef_lambda': 1}
         new_actor_target = actor_target
         new_critic_target = critic_target
 
@@ -210,7 +211,7 @@ class TD3(OffPolicyAlgorithm):
         self.critic_target = self.policy.critic_target
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        actor_losses, critic_losses = [], []
+        actor_losses, critic_losses, coef_lambda = [], [], []
 
         for _ in range(gradient_steps):
             self._n_updates += 1
@@ -232,12 +233,13 @@ class TD3(OffPolicyAlgorithm):
             self._create_aliases()
             actor_losses.append(info['actor_loss'])
             critic_losses.append(info['critic_loss'])
-
+            coef_lambda.append(info['coef_lambda'])
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
+        self.logger.record("train/coef", np.mean(coef_lambda))
 
     def learn(
         self,

@@ -322,7 +322,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                     self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
                 else:
                     break
-                callback.on_step()
+                for _ in range(gradient_steps):
+                    callback.on_step()
                 if log_interval is not None and self.num_timesteps % log_interval == 0:
                     self._dump_logs()
 

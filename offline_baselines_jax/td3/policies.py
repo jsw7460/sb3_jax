@@ -172,7 +172,7 @@ class TD3Policy(object):
     def _predict(self, observation: jnp.ndarray, deterministic: bool = False) -> jnp.ndarray:
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
-        return sample_actions(self.actor.apply_fn, self.actor.params, observation)
+        return np.asarray(sample_actions(self.actor.apply_fn, self.actor.params, observation))
 
     def predict(self, observation: jnp.ndarray, deterministic: bool = False) -> np.ndarray:
         actions = self._predict(observation)
