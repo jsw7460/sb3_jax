@@ -15,53 +15,31 @@ from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
 from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
 from offline_baselines_jax.sac.policies import SACPolicy
 
-def log_prob_correction(x: jnp.ndarray) -> jnp.ndarray:
-    # Squash correction (from original SAC implementation)
-    return jnp.sum(jnp.log(1.0 - jnp.tanh(x) ** 2 + 1e-6), axis=1)
-
-class LogAlphaCoef(nn.Module):
-    init_value: float = 1.0
-
-    @nn.compact
-    def __call__(self) -> jnp.ndarray:
-        log_temp = self.param('log_alpha', init_fn=lambda key: jnp.full((), jnp.log(self.init_value)))
-        return log_temp
-
 class LogEntropyCoef(nn.Module):
     init_value: float = 1.0
     num_tasks: int = 10
 
     @nn.compact
-    def __call__(self, task_id: jnp.array) -> jnp.ndarray:
+    def __call__(self) -> jnp.ndarray:
         log_temp = self.param('log_temp', init_fn=lambda key: jnp.full((self.num_tasks, ), jnp.log(self.init_value)))
-        return jnp.sum(log_temp * task_id, keepdims=True, axis=1)
+        return log_temp
 
-def log_alpha_update(log_alpha_coef: Model, conservative_loss: float) -> Tuple[Model, InfoDict]:
-    def alpha_loss_fn(alpha_params: Params):
-        alpha_coef = jnp.exp(log_alpha_coef.apply_fn({'params': alpha_params}))
-        alpha_coef_loss = -alpha_coef * conservative_loss
-
-        return alpha_coef_loss, {'alpha_coef': alpha_coef, 'alpha_coef_loss': alpha_coef_loss}
-
-    new_alpha_coef, info = log_alpha_coef.apply_gradient(alpha_loss_fn)
-    new_alpha_coef = param_clip(new_alpha_coef, 1e+6)
-    return new_alpha_coef, info
-
-def log_ent_coef_update(key:Any, log_ent_coef: Model, actor:Model , target_entropy: float, replay_data:ReplayBufferSamples,
-                        task_id: jnp.array) -> Tuple[Model, InfoDict]:
+def log_ent_coef_update(key:Any, log_ent_coef: Model, actor:Model , target_entropy: float,
+                        replay_data:ReplayBufferSamples, task_id: jnp.array) -> Tuple[Model, InfoDict]:
     def temperature_loss_fn(ent_params: Params):
         dist = actor(replay_data.observations)
         actions_pi = dist.sample(seed=key)
         log_prob = dist.log_prob(actions_pi)
 
-        ent_coef = log_ent_coef.apply_fn({'params': ent_params}, task_id)
+        ent_coef = log_ent_coef.apply_fn({'params': ent_params})
+        ent_coef = jnp.sum(ent_coef * task_id, keepdims=True, axis=1)
         ent_coef_loss = -(ent_coef * (target_entropy + log_prob)).mean()
 
-        return ent_coef_loss, {'ent_coef': ent_coef, 'ent_coef_loss': ent_coef_loss}
+
+        return ent_coef_loss, {'ent_coef': ent_coef.mean(), 'ent_coef_loss': ent_coef_loss}
 
     new_ent_coef, info = log_ent_coef.apply_gradient(temperature_loss_fn)
     return new_ent_coef, info
-
 
 def sac_actor_update(key: int, actor: Model, critic:Model, log_ent_coef: Model, replay_data:ReplayBufferSamples,
                      task_id: jnp.ndarray):
@@ -70,73 +48,50 @@ def sac_actor_update(key: int, actor: Model, critic:Model, log_ent_coef: Model, 
         actions_pi = dist.sample(seed=key)
         log_prob = dist.log_prob(actions_pi)
 
-        ent_coef = jnp.exp(log_ent_coef(task_id))
+        ent_coef = log_ent_coef()
+
+        sm_balancing = nn.softmax(-jnp.exp(ent_coef))
+        loss_balancing_weight = jnp.sum(sm_balancing * task_id, keepdims=True, axis=1)
+        ent_coef = jnp.exp(jnp.sum(ent_coef * task_id, keepdims=True, axis=1))
 
         q_values_pi = critic(replay_data.observations, actions_pi)
         min_qf_pi = jnp.minimum(q_values_pi[0], q_values_pi[1])
 
-        actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
+        actor_loss = jnp.mean(loss_balancing_weight * (ent_coef * log_prob - min_qf_pi))
         return actor_loss, {'actor_loss': actor_loss, 'entropy': -log_prob}
 
     new_actor, info = actor.apply_gradient(actor_loss_fn)
     return new_actor, info
 
-
 def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model,
-                                log_alpha_coef: Model, replay_data: ReplayBufferSamples, gamma:float, conservative_weight:float,
-                                lagrange_thresh:float, task_id: jnp.ndarray,):
-    next_dist = actor(replay_data.next_observations)
-    next_actions = next_dist.sample(seed=key)
-    next_log_prob = next_dist.log_prob(next_actions)
+                      replay_data:ReplayBufferSamples, gamma:float, task_id: jnp.ndarray):
+    dist = actor(replay_data.next_observations)
+    next_actions = dist.sample(seed=key)
+    next_log_prob = dist.log_prob(next_actions)
 
     # Compute the next Q values: min over all critics targets
     next_q_values = critic_target(replay_data.next_observations, next_actions)
     next_q_values = jnp.minimum(next_q_values[0], next_q_values[1])
 
-    ent_coef = jnp.exp(log_ent_coef(task_id))
+    ent_coef = log_ent_coef()
+
+    sm_balancing = nn.softmax(-jnp.exp(ent_coef))
+    loss_balancing_weight = jnp.sum(sm_balancing * task_id, keepdims=True, axis=1)
+    ent_coef = jnp.exp(jnp.sum(ent_coef * task_id, keepdims=True, axis=1))
+
     # add entropy term
     next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
     # td error + entropy term
     target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
 
-    batch_size, action_dim = replay_data.actions.shape
-    alpha_coef = jnp.exp(log_alpha_coef())
-    ###############################
-    ## For CQL Conservative Loss ##
-    ###############################
-
-    cql_dist = actor(replay_data.observations)
-    cql_actions = cql_dist.sample(seed=key)
-    cql_log_prob = cql_dist.log_prob(cql_actions)
-
-    repeated_observations = dict()
-    repeated_observations['obs'] = jnp.repeat(replay_data.observations['obs'], repeats=10, axis=0)
-    repeated_observations['task'] = jnp.repeat(replay_data.observations['task'], repeats=10, axis=0)
-
-    key, subkey = jax.random.split(key, 2)
-    random_actions = jax.random.uniform(subkey, minval=-1, maxval=1, shape=(batch_size * 10, action_dim))
-
-    random_density = jnp.log(0.5 ** action_dim)
-
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
         current_q1, current_q2 = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
-
-        cql_q1, cql_q2 = critic.apply_fn({'params': critic_params}, replay_data.observations, cql_actions)
-        cql_q1 = jnp.repeat(cql_q1, repeats=10, axis=0)
-        cql_q2 = jnp.repeat(cql_q2, repeats=10, axis=0)
-
-        random_q1, random_q2 = critic.apply_fn({'params': critic_params}, repeated_observations, random_actions)
-
-        conservative_loss_1 = jax.scipy.special.logsumexp(jnp.concatenate([cql_q1 - cql_log_prob, random_q1 - random_density], axis=1)).mean() - current_q1.mean()
-        conservative_loss_2 = jax.scipy.special.logsumexp(jnp.concatenate([cql_q2 - cql_log_prob, random_q2 - random_density], axis=1)).mean() - current_q2.mean()
-
-        conservative_loss = (conservative_weight * ((conservative_loss_1 + conservative_loss_2) / 2) - lagrange_thresh)
         # Compute critic loss
-        critic_loss = 0.5 * (jnp.mean(jnp.square(current_q1 - target_q_values)) + jnp.mean(jnp.square(current_q2 - target_q_values))) + alpha_coef * conservative_loss
-
-        return critic_loss, {'critic_loss': critic_loss, 'current_q1': current_q1, 'current_q2': current_q2.mean(), 'conservative_loss': conservative_loss}
+        critic_loss = 0.5 * (jnp.mean(loss_balancing_weight * jnp.square(current_q1 - target_q_values))
+                             + jnp.mean(loss_balancing_weight * jnp.square(current_q2 - target_q_values)))
+        return critic_loss, {'critic_loss': critic_loss, 'current_q1': current_q1, 'current_q2': current_q2.mean()}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info
@@ -146,20 +101,14 @@ def target_update(critic: Model, critic_target: Model, tau: float) -> Model:
     new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), critic.params, critic_target.params)
     return critic_target.replace(params=new_target_params)
 
-def param_clip(log_alpha_coef: Model, a_max: float) -> Model:
-    new_log_alpha_params = jax.tree_multimap(lambda p: jnp.clip(p, a_max=jnp.log(a_max)), log_alpha_coef.params)
-    return log_alpha_coef.replace(params=new_log_alpha_params)
 
-@functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update',
-                                             'alpha_update', 'conservative_weight', 'lagrange_thresh'))
+@functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update'))
 def _update_jit(
-    rng: int, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model, log_alpha_coef: Model, replay_data: ReplayBufferSamples,
-        gamma: float, target_entropy: float, tau: float, target_update_cond: bool, entropy_update: bool, alpha_update: bool,
-        conservative_weight:float, lagrange_thresh:float, task_id: jnp.array,
-) -> Tuple[int, Model, Model, Model, Model, Model, InfoDict]:
+    rng: int, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples,
+        gamma: float, target_entropy: float, tau: float, target_update_cond: bool, entropy_update: bool, task_id: jnp.array,
+) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
     rng, key = jax.random.split(rng)
-    new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, log_alpha_coef, replay_data,
-                                                gamma, conservative_weight, lagrange_thresh, task_id)
+    new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, replay_data, gamma, task_id)
     if target_update_cond:
         new_critic_target = target_update(new_critic, critic_target, tau)
     else:
@@ -171,19 +120,14 @@ def _update_jit(
     if entropy_update:
         new_temp, ent_info = log_ent_coef_update(key, log_ent_coef, new_actor, target_entropy, replay_data, task_id)
     else:
-        new_temp, ent_info = log_ent_coef, {'ent_coef': jnp.exp(log_ent_coef()), 'ent_coef_loss': 0}
+        new_temp, ent_info = log_ent_coef, {'ent_coef': jnp.exp(log_ent_coef(task_id)), 'ent_coef_loss': 0}
 
-    if alpha_update:
-        new_alpha, alpha_info = log_alpha_update(log_alpha_coef, critic_info['conservative_loss'])
-    else:
-        new_alpha, alpha_info = log_alpha_coef, {'alpha_coef': jnp.exp(log_alpha_coef()), 'alpha_coef_loss': 0}
-
-    return rng, new_actor, new_critic, new_critic_target, new_temp, new_alpha, {**critic_info, **actor_info, **ent_info, **alpha_info}
+    return rng, new_actor, new_critic, new_critic_target, new_temp, {**critic_info, **actor_info, **ent_info}
 
 
-class MTCQL(OffPolicyAlgorithm):
+class SoftModularization(OffPolicyAlgorithm):
     """
-    Conservative Q Learning (CQL)
+    Mutli-task Soft Actor-Critic (MTSAC)
 
     :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
     :param env: The environment to learn from (if registered in Gym, can be str)
@@ -234,7 +178,7 @@ class MTCQL(OffPolicyAlgorithm):
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 3e-4,
         buffer_size: int = 1_000_000,  # 1e6
-        learning_starts: int = 0,
+        learning_starts: int = 10000,
         batch_size: int = 256,
         tau: float = 0.005,
         gamma: float = 0.99,
@@ -253,18 +197,14 @@ class MTCQL(OffPolicyAlgorithm):
         verbose: int = 0,
         seed: int = 0,
         _init_setup_model: bool = True,
-        num_tasks: int = 10,
-        # Add for CQL
-        alpha_coef: float = "auto",
-        lagrange_thresh: int = 10.0,
-        without_exploration: bool = True,
-        conservative_weight: float = 10.0,
+        num_tasks: int = 8,
+        without_exploration: bool = False,
     ):
         if replay_buffer_kwargs is None:
             replay_buffer_kwargs = dict()
         replay_buffer_kwargs['num_tasks'] = num_tasks
 
-        super(MTCQL, self).__init__(
+        super(SoftModularization, self).__init__(
             policy,
             env,
             learning_rate,
@@ -289,26 +229,21 @@ class MTCQL(OffPolicyAlgorithm):
             without_exploration=without_exploration,
         )
 
+        assert batch_size % num_tasks == 0, "batch_size is multiple of the number of tasks"
         self.target_entropy = target_entropy
         self.log_ent_coef = None
-        self.log_alpha_coef = None
         # Entropy coefficient / Entropy temperature
         # Inverse of the reward scale
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
         self.entropy_update = True
-        self.alpha_update = True
-        self.lagrange_thresh = lagrange_thresh
-        self.alpha_coef = alpha_coef
-        self.conservative_weight = conservative_weight
-
         self.num_tasks = num_tasks
 
         if _init_setup_model:
             self._setup_model()
 
     def _setup_model(self) -> None:
-        super(MTCQL, self)._setup_model()
+        super(SoftModularization, self)._setup_model()
         self._create_aliases()
         # Target entropy is used when learning the entropy coefficient
         if self.target_entropy == "auto":
@@ -333,7 +268,7 @@ class MTCQL(OffPolicyAlgorithm):
             task_id = jax.nn.one_hot(jnp.repeat(jnp.arange(0, self.num_tasks), 1), self.num_tasks)
             log_ent_coef_def = LogEntropyCoef(init_value, self.num_tasks)
             self.key, temp_key = jax.random.split(self.key, 2)
-            self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key, task_id],
+            self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key],
                                              tx=optax.adam(learning_rate=self.lr_schedule(1)))
 
         else:
@@ -345,25 +280,7 @@ class MTCQL(OffPolicyAlgorithm):
             self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key])
             self.entropy_update = False
 
-        if isinstance(self.alpha_coef, str) and self.ent_coef.startswith("auto"):
-            # Default initial value of alpha_coef when learned
-            init_value = 1.0
-            log_alpha_coef_def = LogAlphaCoef(init_value)
-            self.key, temp_key = jax.random.split(self.key, 2)
-            self.log_alpha_coef = Model.create(log_alpha_coef_def, inputs=[temp_key],
-                                             tx=optax.adam(learning_rate=self.lr_schedule(1)))
-
-        else:
-            # Force conversion to float
-            # this will throw an error if a malformed string (different from 'auto')
-            # is passed
-            log_alpha_coef_def = LogAlphaCoef(self.alpha_coef)
-            self.key, temp_key = jax.random.split(self.key, 2)
-            self.log_alpha_coef = Model.create(log_alpha_coef_def, inputs=[temp_key])
-            self.alpha_update = False
-
         self.task_id = jax.nn.one_hot(jnp.repeat(jnp.arange(0, self.num_tasks), self.batch_size//self.num_tasks), self.num_tasks)
-
 
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
@@ -373,7 +290,6 @@ class MTCQL(OffPolicyAlgorithm):
     def train(self, gradient_steps: int, batch_size: int = 64) -> None:
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
-        alpha_coef_losses, alpha_coefs, conservative_losses = [], [], []
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
@@ -381,45 +297,35 @@ class MTCQL(OffPolicyAlgorithm):
             self.key, key = jax.random.split(self.key, 2)
 
             target_update_cond = gradient_step % self.target_update_interval == 0
-            self.key, new_actor, new_critic, new_critic_target, new_log_ent_coef, new_log_alpha_coef, info \
-                = _update_jit(key, self.actor, self.critic, self.critic_target, self.log_ent_coef, self.log_alpha_coef,
-                              replay_data, self.gamma, self.target_entropy, self.tau, target_update_cond,
-                              self.entropy_update, self.alpha_update, self.conservative_weight, self.lagrange_thresh, self.task_id)
+            self.key, new_actor, new_critic, new_critic_target, new_log_ent_coef, info \
+                = _update_jit(key, self.actor, self.critic, self.critic_target, self.log_ent_coef, replay_data,
+                              self.gamma, self.target_entropy, self.tau, target_update_cond, self.entropy_update, self.task_id)
 
             ent_coef_losses.append(info['ent_coef_loss'])
             ent_coefs.append(info['ent_coef'])
             critic_losses.append(info['critic_loss'])
             actor_losses.append(info['actor_loss'])
-            alpha_coefs.append(info['alpha_coef'])
-            alpha_coef_losses.append(info['alpha_coef_loss'])
-            conservative_losses.append(info['conservative_loss'])
 
             self.policy.actor = new_actor
             self.policy.critic = new_critic
             self.policy.critic_target = new_critic_target
             self.log_ent_coef = new_log_ent_coef
-            self.log_alpha_coef = new_log_alpha_coef
 
             self._create_aliases()
-
-        # self.replay_buffer._reload_task_latents()
 
         self._n_updates += gradient_steps
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))
-        self.logger.record("train/alpha_coef", np.mean(alpha_coefs))
         self.logger.record("train/actor_loss", np.mean(actor_losses))
         self.logger.record("train/critic_loss", np.mean(critic_losses))
-        self.logger.record("train/conservative_loss", np.mean(conservative_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
-            self.logger.record("train/alpha_coef_loss", np.mean(alpha_coef_losses))
 
     def learn(
         self,
         total_timesteps: int,
         callback: MaybeCallback = None,
-        log_interval: int = 1000,
+        log_interval: int = 4,
         eval_env: Optional[GymEnv] = None,
         eval_freq: int = -1,
         n_eval_episodes: int = 5,
@@ -428,7 +334,7 @@ class MTCQL(OffPolicyAlgorithm):
         reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
 
-        return super(MTCQL, self).learn(
+        return super(SoftModularization, self).learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -441,7 +347,7 @@ class MTCQL(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super(MTCQL, self)._excluded_save_params() + ["actor", "critic", "critic_target", "log_ent_coef", "log_alpha_coef"]
+        return super(SoftModularization, self)._excluded_save_params() + ["actor", "critic", "critic_target", "log_ent_coef"]
 
     def _get_jax_save_params(self) -> Dict[str, Params]:
         params_dict = {}
@@ -449,8 +355,7 @@ class MTCQL(OffPolicyAlgorithm):
         params_dict['critic'] = self.critic.params
         params_dict['critic_target'] = self.critic_target.params
         params_dict['log_ent_coef'] = self.log_ent_coef.params
-        params_dict['log_alpha_coef'] = self.log_alpha_coef.params
         return params_dict
 
     def _get_jax_load_params(self) -> List[str]:
-        return ['actor', 'critic', 'critic_target', 'log_ent_coef', 'log_alpha_coef']
+        return ['actor', 'critic', 'critic_target', 'log_ent_coef']

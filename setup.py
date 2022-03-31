@@ -13,6 +13,8 @@ setup(
         "stable_baselines3==1.4.0",
         "jax",
         "flax",
+        "tensorflow_probability",
+        'optax'
     ],
     description="Jax version of implementations of offline reinforcement learning algorithms.",
     author="Minjong Yoo",

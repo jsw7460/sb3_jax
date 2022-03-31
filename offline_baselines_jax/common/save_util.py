@@ -19,7 +19,7 @@ import torch as th
 
 import offline_baselines_jax
 from offline_baselines_jax.common.type_aliases import TensorDict, Params
-from stable_baselines3.common.utils import get_system_info
+from offline_baselines_jax.common.utils import get_system_info
 
 
 def recursive_getattr(obj: Any, attr: str, *args) -> Any:

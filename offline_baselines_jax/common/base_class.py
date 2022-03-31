@@ -11,7 +11,7 @@ import gym
 import numpy as np
 
 from stable_baselines3.common.logger import Logger
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
+from offline_baselines_jax.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
 from stable_baselines3.common.env_util import is_wrapped
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import ActionNoise
@@ -496,6 +496,7 @@ class BaseAlgorithm(ABC):
         state: Optional[Tuple[np.ndarray, ...]] = None,
         episode_start: Optional[np.ndarray] = None,
         deterministic: bool = False,
+        **kwargs,
     ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
         """
         Get the policy action from an observation (and optional hidden state).
@@ -510,7 +511,7 @@ class BaseAlgorithm(ABC):
         :return: the model's action and the next hidden state
             (used in recurrent policies)
         """
-        return self.policy.predict(observation, deterministic)
+        return self.policy.predict(observation, deterministic, **kwargs)
 
     def set_random_seed(self, seed: Optional[int] = None) -> None:
         """

@@ -1,6 +1,6 @@
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable
 
 import numpy as np
 from gym import spaces
@@ -11,6 +11,8 @@ from offline_baselines_jax.common.type_aliases import (
     ReplayBufferSamples,
 )
 
+import jax
+import jax.numpy as jnp
 from stable_baselines3.common.vec_env import VecNormalize
 
 try:
@@ -19,6 +21,9 @@ try:
 except ImportError:
     psutil = None
 
+@jax.jit
+def normal_sampling(key:Any, task_latents_mu:jnp.ndarray, task_latents_log_std:jnp.ndarray):
+    return task_latents_mu + jax.random.normal(key, shape=(task_latents_log_std.shape[-1], )) * jnp.exp(0.5 * task_latents_log_std)
 
 class BaseBuffer(ABC):
     """
@@ -309,6 +314,7 @@ class DictReplayBuffer(ReplayBuffer):
         observation_space: spaces.Space,
         action_space: spaces.Space,
         n_envs: int = 1,
+        task_embedding_lambda: bool = False,
         optimize_memory_usage: bool = False,
         handle_timeout_termination: bool = True,
     ):
@@ -316,6 +322,8 @@ class DictReplayBuffer(ReplayBuffer):
 
         assert isinstance(self.obs_shape, dict), "DictReplayBuffer must be used with Dict obs space only"
         self.buffer_size = max(buffer_size // n_envs, 1)
+        self.key = jax.random.PRNGKey(0)
+        self.task_embedding_lambda = task_embedding_lambda
 
         # Check that the replay buffer can fit into the memory
         if psutil is not None:
@@ -334,6 +342,12 @@ class DictReplayBuffer(ReplayBuffer):
             key: np.zeros((self.buffer_size, self.n_envs) + _obs_shape, dtype=observation_space[key].dtype)
             for key, _obs_shape in self.obs_shape.items()
         }
+
+        if task_embedding_lambda:
+            self.task_embeddings = {'task_latents_mu': np.zeros_like(self.observations['task']),
+                                    'task_latents_log_std': np.zeros_like(self.observations['task']),
+                                    'next_task_latents_mu': np.zeros_like(self.next_observations['task']),
+                                    'next_task_latents_log_std': np.zeros_like(self.next_observations['task'])}
 
         self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=action_space.dtype)
         self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
@@ -373,6 +387,7 @@ class DictReplayBuffer(ReplayBuffer):
         reward: np.ndarray,
         done: np.ndarray,
         infos: List[Dict[str, Any]],
+        task_embeddings: Dict[str, np.ndarray] = None,
     ) -> None:
         # Copy to avoid modification by reference
         for key in self.observations.keys():
@@ -387,6 +402,10 @@ class DictReplayBuffer(ReplayBuffer):
                 next_obs[key] = next_obs[key].reshape((self.n_envs,) + self.obs_shape[key])
             self.next_observations[key][self.pos] = np.array(next_obs[key]).copy()
 
+        if self.task_embedding_lambda:
+            for key in self.task_embeddings.keys():
+                self.task_embeddings[key][self.pos] = np.array(task_embeddings[key]).copy()
+
         # Same reshape, for actions
         if isinstance(self.action_space, spaces.Discrete):
             action = action.reshape((self.n_envs, self.action_dim))
@@ -397,6 +416,7 @@ class DictReplayBuffer(ReplayBuffer):
 
         if self.handle_timeout_termination:
             self.timeouts[self.pos] = np.array([info.get("TimeLimit.truncated", False) for info in infos])
+
 
         self.pos += 1
         if self.pos == self.buffer_size:
@@ -424,6 +444,14 @@ class DictReplayBuffer(ReplayBuffer):
 
         observations = {key: obs for key, obs in obs_.items()}
         next_observations = {key: obs for key, obs in next_obs_.items()}
+        if self.task_embedding_lambda:
+            self.key, task_key, next_key = jax.random.split(self.key, 3)
+            task_latents_mu = self.task_embeddings['task_latents_mu'][batch_inds, env_indices, :]
+            task_latents_log_std = self.task_embeddings['task_latents_log_std'][batch_inds, env_indices, :]
+            next_task_latents_mu = self.task_embeddings['next_task_latents_mu'][batch_inds, env_indices, :]
+            next_task_latents_log_std = self.task_embeddings['next_task_latents_log_std'][batch_inds, env_indices, :]
+            observations['task'] = normal_sampling(task_key, task_latents_mu, task_latents_log_std)
+            next_observations['task'] = normal_sampling(next_key, next_task_latents_mu, next_task_latents_log_std)
 
         return DictReplayBufferSamples(
             observations=observations,
@@ -437,6 +465,13 @@ class DictReplayBuffer(ReplayBuffer):
             rewards=self._normalize_reward(self.rewards[batch_inds, env_indices].reshape(-1, 1), env),
         )
 
+    def _reload_task_latents(self):
+        return
+        if self.task_embedding_lambda:
+            self.key, task_key, next_key = jax.random.split(self.key, 3)
+            self.observations['task'] = normal_sampling(task_key, self.task_embeddings['task_latents_mu'], self.task_embeddings['task_latents_log_std'])
+            self.next_observations['task'] = normal_sampling(next_key, self.task_embeddings['next_task_latents_mu'], self.task_embeddings['next_task_latents_log_std'])
+
 
 class TaskDictReplayBuffer(object):
     def __init__(
@@ -446,6 +481,7 @@ class TaskDictReplayBuffer(object):
             action_space: spaces.Space,
             n_envs: int = 1,
             optimize_memory_usage: bool = False,
+            task_embedding_lambda: bool = False,
             handle_timeout_termination: bool = True,
             num_tasks: int = 10,
     ):
@@ -454,7 +490,12 @@ class TaskDictReplayBuffer(object):
         for _ in range(num_tasks):
             self.replay_buffers.append(DictReplayBuffer(buffer_size//num_tasks, observation_space, action_space,
                                                         n_envs=n_envs, optimize_memory_usage=optimize_memory_usage,
-                                                        handle_timeout_termination=handle_timeout_termination))
+                                                        handle_timeout_termination=handle_timeout_termination,
+                                                        task_embedding_lambda=task_embedding_lambda))
+
+    def _reload_task_latents(self):
+        for i in range(self.num_tasks):
+            self.replay_buffers[i]._reload_task_latents()
 
     def add(
             self,
@@ -464,8 +505,9 @@ class TaskDictReplayBuffer(object):
             reward: np.ndarray,
             done: np.ndarray,
             infos: List[Dict[str, Any]],
+            task_embeddings: Dict[str, np.ndarray] = None,
     ) -> None:
-        self.replay_buffers[infos[0]['task']].add(obs, next_obs, action, reward, done, infos)
+        self.replay_buffers[infos[0]['task']].add(obs, next_obs, action, reward, done, infos, task_embeddings)
 
     def sample(self, batch_size: int, env: Optional[VecNormalize] = None) -> DictReplayBufferSamples:
         """

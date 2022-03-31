@@ -1,6 +1,7 @@
 from offline_baselines_jax import SAC, TD3
 from offline_baselines_jax.sac.policies import SACPolicy
 from offline_baselines_jax.td3.policies import TD3Policy
+from offline_baselines_jax.common.jax_layers import SoftModule
 
 import gym
 

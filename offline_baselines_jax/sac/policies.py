@@ -57,9 +57,9 @@ class Actor(nn.Module):
     activation_fn: Type[nn.Module] = nn.relu
 
     @nn.compact
-    def __call__(self, observations: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, observations: jnp.ndarray, **kwargs) -> jnp.ndarray:
         # Save arguments to re-create object at loading
-        features = self.features_extractor(observations)
+        features = self.features_extractor(observations, **kwargs)
         action_dim = get_action_dim(self.action_space)
         latent_pi = create_mlp(-1, self.net_arch, self.activation_fn)(features)
 
@@ -77,8 +77,8 @@ class Critic(nn.Module):
     activation_fn: Type[nn.Module] = nn.relu
 
     @nn.compact
-    def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray) -> jnp.ndarray:
-        features = self.features_extractor(observations)
+    def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, **kwargs) -> jnp.ndarray:
+        features = self.features_extractor(observations, **kwargs)
         inputs = jnp.concatenate([features, actions], -1)
         q_value = create_mlp(1, self.net_arch, self.activation_fn)(inputs)
         return q_value
@@ -90,14 +90,14 @@ class DoubleCritic(nn.Module):
     n_critics: int = 2
 
     @nn.compact
-    def __call__(self, states, actions):
+    def __call__(self, states, actions, **kwargs):
         VmapCritic = nn.vmap(Critic,
                              variable_axes={'params': 0},
                              split_rngs={'params': True},
                              in_axes=None,
                              out_axes=0,
                              axis_size=self.n_critics)
-        qs = VmapCritic(self.features_extractor, self.net_arch, self.activation_fn)(states, actions)
+        qs = VmapCritic(self.features_extractor, self.net_arch, self.activation_fn, **kwargs)(states, actions)
         return qs
 
 class SACPolicy(object):
@@ -147,8 +147,9 @@ class SACPolicy(object):
                 net_arch = [256, 256]
 
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
-
-        features_extractor_def = features_extractor_class(_observation_space=observation_space)
+        if features_extractor_kwargs is None:
+            features_extractor_kwargs = {}
+        features_extractor_def = features_extractor_class(_observation_space=observation_space, **features_extractor_kwargs)
         actor_def = Actor(features_extractor=features_extractor_def, action_space=action_space,
                           net_arch=actor_arch, activation_fn=activation_fn)
         critic_def = DoubleCritic(features_extractor=features_extractor_def, net_arch=critic_arch,

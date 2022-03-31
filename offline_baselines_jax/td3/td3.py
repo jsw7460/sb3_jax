@@ -160,7 +160,7 @@ class TD3(OffPolicyAlgorithm):
         policy_kwargs: Optional[Dict[str, Any]] = None,
         verbose: int = 0,
         seed: int = 0,
-        alpha: int = 2.5,
+        alpha: int = 20.,
         _init_setup_model: bool = True,
         without_exploration: bool = False,
     ):
@@ -189,7 +189,7 @@ class TD3(OffPolicyAlgorithm):
             support_multi_env=True,
             without_exploration=without_exploration,
         )
-        if without_exploration:
+        if without_exploration and gradient_steps == -1:
             self.gradient_steps = policy_delay
 
         self.alpha = alpha
@@ -234,6 +234,9 @@ class TD3(OffPolicyAlgorithm):
             actor_losses.append(info['actor_loss'])
             critic_losses.append(info['critic_loss'])
             coef_lambda.append(info['coef_lambda'])
+
+        # if self.without_exploration:
+        #     self.replay_buffer._reload_task_latents()
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:

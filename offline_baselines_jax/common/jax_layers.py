@@ -12,6 +12,7 @@ import flax.linen as nn
 
 from offline_baselines_jax.common.preprocessing import is_image_space
 from offline_baselines_jax.common.type_aliases import TensorDict
+from dataclasses import dataclass, field
 
 PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
@@ -80,17 +81,111 @@ class NatureCNN(BaseFeaturesExtractor):
         x = nn.relu(x)
         return x
 
+class ResourceRestrictedSoftModule(nn.Module):
+    select_arch: List[int]
+    num_modules: int
+
+    @nn.compact
+    def __call__(self, observation:TensorDict) -> jnp.ndarray:
+        obs = observation['obs']
+        task = observation['task']
+        state_embeddings = MLP(net_arch = self.stata_base_arch, last_activation=True)(obs)
+        task_embeddings = MLP(net_arch = self.task_base_arch, last_activation=True)(task)
+        routing_inputs = state_embeddings * task_embeddings
+        module_selection = MLP(net_arch=self.select_arch + [self.num_modules])(routing_inputs)
+        return module_selection
+
+
+class SoftModule(nn.Module):
+    _observation_space: gym.spaces.Dict
+    state_base_arch: List[int] = field(default_factory=lambda : [64, 64])
+    task_base_arch: List[int] = field(default_factory=lambda : [64])
+    net_arch: List[int] = field(default_factory=lambda : [4, 4, 4])
+    module_arch: List[int] = field(default_factory=lambda : [32])
+
+    @nn.compact
+    def __call__(self, observation: TensorDict, module_select:List[List[int]] = None) -> jnp.ndarray:
+        assert self.state_base_arch[-1] == self.task_base_arch[-1]
+        obs = observation['obs']
+        task = observation['task']
+        state_embeddings = MLP(net_arch = self.state_base_arch, last_activation=True)(obs)
+        task_embeddings = MLP(net_arch = self.task_base_arch, last_activation=True)(task)
+        routing_inputs = state_embeddings * task_embeddings
+
+        prev_model_outputs = [state_embeddings] * self.net_arch[0]
+        first_routing_inputs = routing_inputs
+        module_attention_list = []
+
+        if module_select is None:
+            module_select = []
+            for num_module in self.net_arch:
+                module_select.append(jnp.ones(num_module))
+
+        for idx in range(len(self.net_arch) - 1):
+            routing_output_dim = self.net_arch[idx] * self.net_arch[idx + 1]
+            module_attention = MLP(net_arch=[routing_output_dim])(routing_inputs)
+            module_attention = nn.softmax(jnp.reshape(module_attention, (-1, self.net_arch[idx+1], self.net_arch[idx])))
+            # module_attention = module_attention[..., tuple(module_select[idx + 1]), tuple(module_select[idx])]
+
+            # Not in Paper, but implemented in github (https://github.com/RchalYang/Soft-Module)
+            module_attention_list.append(jnp.reshape(module_attention, (-1, self.net_arch[idx + 1] * self.net_arch[idx])))
+
+            module_outputs = []
+            for i in range(self.net_arch[idx]):
+                module_outputs.append(MLP(net_arch=self.module_arch, last_activation=True)(prev_model_outputs[i]) * module_select[idx][i])
+
+
+            prev_model_outputs = []
+            for i in range(self.net_arch[idx + 1]):
+                model_inputs = jnp.zeros_like(module_outputs[0])
+                for j in range(self.net_arch[idx]):
+                    if module_outputs[j] is not None:
+                        model_inputs += jnp.expand_dims(module_attention[..., i, j], axis=-1) * module_outputs[j]
+                prev_model_outputs.append(model_inputs)
+
+            cond = MLP(net_arch=[routing_inputs.shape[-1]])(jnp.concatenate(module_attention_list, axis=-1))
+            cond = cond * first_routing_inputs
+            routing_inputs = nn.relu(cond)
+
+        module_outputs = []
+        for i in range(self.net_arch[-1]):
+            module_outputs.append(MLP(net_arch=self.module_arch, last_activation=True)(prev_model_outputs[i]) * module_select[-1][i])
+
+        model_inputs = jnp.zeros_like(module_outputs[0])
+        for j in range(len(module_outputs)):
+            model_inputs += module_outputs[j]
+        output = nn.relu(model_inputs)
+        return output
+
+
+class ModuleLayer(nn.Module):
+    net_arch: List[int]
+    activation_fn: Type[nn.Module] = nn.relu
+    n_modules: int = 2
+    last_activation: bool = False
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray):
+        VmapCritic = nn.vmap(MLP,
+                             variable_axes={'params': 0},
+                             split_rngs={'params': True},
+                             in_axes=None,
+                             out_axes=0,
+                             axis_size=self.n_modules)
+        qs = VmapCritic(self.net_arch, self.activation_fn, self.last_activation)(inputs)
+        return qs
 
 class MLP(nn.Module):
     net_arch: List[int]
     activation_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     squash_output: bool = False
+    last_activation: bool = False
 
     @nn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         for i, size in enumerate(self.net_arch):
             x = nn.Dense(size, kernel_init=default_init())(x)
-            if i + 1 < len(self.net_arch):
+            if i + 1 < len(self.net_arch) or self.last_activation:
                 x = self.activation_fn(x)
         if self.squash_output:
             x = nn.tanh(x)
