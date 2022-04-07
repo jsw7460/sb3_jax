@@ -1,8 +1,8 @@
 # Offline Baselines (JAX)
 
-Offline Baselines with JAX is a set of rimplementations of reinforcement learning algorithms in JAX.
+Offline Baselines with JAX is a set of implementations of reinforcement learning algorithms in JAX.
 
-This library is based on Stable Baselines (https://github.com/DLR-RM/stable-baselines3), and JAXRL (https://github.com/ikostrikov/jaxrl).
+This library is based on Stable Baselines 3 (https://github.com/DLR-RM/stable-baselines3), and JAXRL (https://github.com/ikostrikov/jaxrl).
 
 ## Implemented Algorithms
 
@@ -21,14 +21,23 @@ Offline baselines does not support Window OS.
 ### Install
 
 ```
+git clone https://github.com/mjyoo2/offline_baselines_jax.git
 python setup.py install
 ```
 
-### Install using pip (not implemented)
+### Install using pip 
 Install the offline baselines with jax package:
 ```
-pip install offline_baselines_jax
+pip install git+https://github.com/mjyoo2/offline_baselines_jax
 ```
+
+## Performance
+We check speed SAC and TD3 algorithm. We use RTX 3090, Intel i9-10940. Learning environment is HalfCheetah-v2. 
+
+| **Algorithm** | **Stable Baselines (Pytorch)** | **Offline Baselines (Jax)** |
+|---------------|--------------------------------|-----------------------------|
+| SAC           | 125 steps / 1 second           | 570 steps / 1 second        |
+| TD3           | 240 steps / 1 second           | 800 steps / 1 second        |
 
 ## Example
 ```python

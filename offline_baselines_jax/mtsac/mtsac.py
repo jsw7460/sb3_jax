@@ -49,7 +49,7 @@ def sac_actor_update(key: int, actor: Model, critic:Model, log_ent_coef: Model, 
         ent_coef = jnp.exp(log_ent_coef(task_id))
 
         q_values_pi = critic(replay_data.observations, actions_pi)
-        min_qf_pi = jnp.minimum(q_values_pi[0], q_values_pi[1])
+        min_qf_pi = jnp.min(q_values_pi, axis=0)
 
         actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
         return actor_loss, {'actor_loss': actor_loss, 'entropy': -log_prob}
@@ -65,7 +65,7 @@ def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model
 
     # Compute the next Q values: min over all critics targets
     next_q_values = critic_target(replay_data.next_observations, next_actions)
-    next_q_values = jnp.minimum(next_q_values[0], next_q_values[1])
+    next_q_values = jnp.min(next_q_values, axis=0)
 
     ent_coef = jnp.exp(log_ent_coef(task_id))
     # add entropy term
@@ -76,10 +76,14 @@ def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
-        current_q1, current_q2 = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+        current_q = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+
         # Compute critic loss
-        critic_loss = 0.5 * (jnp.mean(jnp.square(current_q1 - target_q_values)) + jnp.mean(jnp.square(current_q2 - target_q_values)))
-        return critic_loss, {'critic_loss': critic_loss, 'current_q1': current_q1, 'current_q2': current_q2.mean()}
+        critic_loss = 0
+        for q in current_q:
+            critic_loss = critic_loss + jnp.mean(jnp.square(q - target_q_values))
+        critic_loss = critic_loss / len(current_q)
+        return critic_loss, {'critic_loss': critic_loss, 'current_q': current_q.mean()}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info

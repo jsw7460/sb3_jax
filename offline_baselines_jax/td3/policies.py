@@ -135,9 +135,12 @@ class TD3Policy(object):
             else:
                 net_arch = [400, 300]
 
+        if features_extractor_kwargs is None:
+            features_extractor_kwargs = {}
+
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
 
-        features_extractor_def = features_extractor_class(_observation_space=observation_space)
+        features_extractor_def = features_extractor_class(_observation_space=observation_space, **features_extractor_kwargs)
         actor_def = Actor(features_extractor=features_extractor_def, action_space=action_space,
                           net_arch=actor_arch, activation_fn=activation_fn)
         critic_def = DoubleCritic(features_extractor=features_extractor_def, net_arch=critic_arch,

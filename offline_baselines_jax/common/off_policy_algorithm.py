@@ -11,7 +11,7 @@ import jax
 
 from offline_baselines_jax.common.base_class import BaseAlgorithm
 from offline_baselines_jax.common.buffers import DictReplayBuffer, ReplayBuffer
-from offline_baselines_jax.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import ActionNoise, VectorizedActionNoise
 from offline_baselines_jax.common.save_util import load_from_pkl, save_to_pkl
 from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, TrainFreq, TrainFrequencyUnit, RolloutReturn

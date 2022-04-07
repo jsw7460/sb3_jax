@@ -8,7 +8,7 @@ import numpy as np
 import jax.numpy as jnp
 import flax
 
-from offline_baselines_jax.common import callbacks
+from stable_baselines3.common import callbacks
 from stable_baselines3.common import vec_env
 
 GymEnv = Union[gym.Env, vec_env.VecEnv]

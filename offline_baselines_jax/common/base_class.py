@@ -11,7 +11,7 @@ import gym
 import numpy as np
 
 from stable_baselines3.common.logger import Logger
-from offline_baselines_jax.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
 from stable_baselines3.common.env_util import is_wrapped
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import ActionNoise
@@ -575,6 +575,11 @@ class BaseAlgorithm(ABC):
                 "Names of parameters do not match agents' parameters: "
                 f"expected {objects_needing_update}, got {updated_objects}"
             )
+
+    def _load_policy(self) -> None:
+        self.policy.actor = self.actor
+        self.policy.critic = self.critic
+        self.policy.critic_target = self.critic_target
 
     @classmethod
     def load(

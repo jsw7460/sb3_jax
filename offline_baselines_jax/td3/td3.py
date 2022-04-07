@@ -25,16 +25,19 @@ def td3_critic_update(key:Any, critic: Model, critic_target: Model, actor_target
 
     # Compute the next Q-values: min over all critics targets
     next_q_values = critic_target(replay_data.next_observations, next_actions)
-    next_q_values = jnp.minimum(next_q_values[0], next_q_values[1])
+    next_q_values = jnp.min(next_q_values, axis=0)
     target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
 
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
-        current_q1, current_q2 = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+        current_q = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
 
+        critic_loss = 0
         # Compute critic loss
-        critic_loss = 0.5 * (jnp.mean(jnp.square(current_q1 - target_q_values)) + jnp.mean(jnp.square(current_q2 - target_q_values)))
-        return critic_loss, {'critic_loss': critic_loss, 'current_q1': current_q1.mean(), 'current_q2': current_q2.mean()}
+        for q in current_q:
+            critic_loss = critic_loss + jnp.mean(jnp.square(q - target_q_values))
+        critic_loss = critic_loss / len(current_q)
+        return critic_loss, {'critic_loss': critic_loss, 'current_q': current_q.mean()}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info
@@ -160,7 +163,7 @@ class TD3(OffPolicyAlgorithm):
         policy_kwargs: Optional[Dict[str, Any]] = None,
         verbose: int = 0,
         seed: int = 0,
-        alpha: int = 20.,
+        alpha: int = 2.5,
         _init_setup_model: bool = True,
         without_exploration: bool = False,
     ):
@@ -235,8 +238,6 @@ class TD3(OffPolicyAlgorithm):
             critic_losses.append(info['critic_loss'])
             coef_lambda.append(info['coef_lambda'])
 
-        # if self.without_exploration:
-        #     self.replay_buffer._reload_task_latents()
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
@@ -282,3 +283,7 @@ class TD3(OffPolicyAlgorithm):
 
     def _get_jax_load_params(self) -> List[str]:
         return ['actor', 'critic', 'critic_target', 'actor_target']
+
+    def _load_policy(self) -> None:
+        super(TD3, self)._load_policy()
+        self.policy.actor_target = self.actor_target
