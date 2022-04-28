@@ -12,7 +12,7 @@ setup(
     install_requires=[
         "stable_baselines3==1.4.0",
         "jax==0.3.4",
-        "jax==3.2 + cuda11.cudnn82",
+        "jaxlib==0.3.2",
         "flax==0.4.0",
         "tensorflow_probability",
         'optax==0.1.1'
