@@ -21,7 +21,7 @@ InfoDict = Dict[str, float]
 
 
 def default_init():
-    return nn.initializers.he_normal()
+    return nn.initializers.lecun_normal()
 
 
 class BaseFeaturesExtractor(nn.Module):
