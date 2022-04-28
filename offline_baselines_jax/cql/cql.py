@@ -118,7 +118,6 @@ def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model
         conservative_loss = 0
         for idx in range(len(cql_q)):
             conservative_loss += jax.scipy.special.logsumexp(jnp.ndarray([jnp.repeat(cql_q[idx], repeats=10, axis=0) - cql_log_prob, random_q[idx] - random_density])).mean() - current_q[idx].mean()
-
         conservative_loss = (conservative_weight * ((conservative_loss) / len(cql_q)) - lagrange_thresh)
         # Compute critic loss
         critic_loss = 0

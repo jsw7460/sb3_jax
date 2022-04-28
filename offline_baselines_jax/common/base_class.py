@@ -659,7 +659,7 @@ class BaseAlgorithm(ABC):
 
         # put state_dicts back in place
         model.set_parameters(params, exact_match=True)
-
+        model._load_policy()
         return model
 
     def get_parameters(self) -> Dict[str, Params]:
