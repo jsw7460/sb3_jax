@@ -1,0 +1,62 @@
+# Mode
+finetune: False
+
+
+# Env, data
+seed: 0
+env_name: hopper-medium-v2
+expert_data_path: /workspace/expertdata/dttrajectory/
+normalize: 1
+
+
+# Offline Train
+n_batch: 1
+n_iter: 200
+context_len: 20
+future_len: 7
+dropout: 0.1
+latent_dim: 25
+net_arch:
+  - 256
+  - 256
+
+
+# Finetuning Train
+finetune_type: higher_actor
+warmup: 0
+
+
+# Eval
+n_eval_episodes: 10
+
+
+# Filename
+filename_head: /workspace/jaxlog
+filename_tail: ${env_name}/${modeltype.name}-context${context_len}-future${future_len}-normalize${normalize}-seed${seed}-vae
+tensorboard_log: ${filename_head}/tensorboard/${filename_tail}
+model_path: ${filename_head}/model/${filename_tail}
+
+
+# Model Type
+modeltype:
+  name: METLAMSE
+
+
+# Model
+model:
+  _target_: offline_baselines_jax.metla.${modeltype.name}
+  seed: ${seed}
+  verbose: 1
+  batch_size: 256
+  tensorboard_log: ${tensorboard_log}
+  buffer_size: 50000
+  train_freq: 1
+  without_exploration: True
+  context_len: ${context_len}
+  future_len: ${future_len}
+  dropout: 0.1
+  normalize: ${normalize},
+  policy_kwargs:
+    latent_dim: ${latent_dim}
+    net_arch: ${net_arch}
+    dropout: ${dropout}

@@ -14,7 +14,15 @@ from offline_baselines_jax.common.buffers import DictReplayBuffer, ReplayBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.noise import ActionNoise, VectorizedActionNoise
 from offline_baselines_jax.common.save_util import load_from_pkl, save_to_pkl
-from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, TrainFreq, TrainFrequencyUnit, RolloutReturn
+from offline_baselines_jax.common.type_aliases import (
+    GymEnv,
+    MaybeCallback,
+    Schedule,
+    TrainFreq,
+    TrainFrequencyUnit,
+    RolloutReturn,
+    Params
+)
 from offline_baselines_jax.common.utils import safe_mean, should_collect_more_steps
 from stable_baselines3.common.vec_env import VecEnv
 
@@ -88,6 +96,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         remove_time_limit_termination: bool = False,
         supported_action_spaces: Optional[Tuple[gym.spaces.Space, ...]] = None,
         without_exploration: bool = False,
+        dropout: float = 0.0,
     ):
 
         super(OffPolicyAlgorithm, self).__init__(
@@ -129,6 +138,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         self.actor = None
         self.replay_buffer = None  # type: Optional[ReplayBuffer]
 
+        self.dropout = dropout
+
     def _convert_train_freq(self) -> None:
         """
         Convert `train_freq` parameter (int or tuple)
@@ -144,7 +155,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             try:
                 train_freq = (train_freq[0], TrainFrequencyUnit(train_freq[1]))
             except ValueError:
-                raise ValueError(f"The unit of the `train_freq` must be either 'step' or 'episode' not '{train_freq[1]}'!")
+                raise ValueError(
+                    f"The unit of the `train_freq` must be either 'step' or 'episode' not '{train_freq[1]}'!"
+                )
 
             if not isinstance(train_freq[0], int):
                 raise ValueError(f"The frequency of `train_freq` must be an integer and not {train_freq[0]}")
@@ -176,13 +189,12 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         self.key, key = jax.random.split(self.key, 2)
 
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
-            key,
-            self.observation_space,
-            self.action_space,
-            self.lr_schedule,
+            key=key,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            lr_schedule=self.lr_schedule,
             **self.policy_kwargs,  # pytype:disable=not-instantiable
         )
-
         # Convert train freq parameter to TrainFreq object
         self._convert_train_freq()
 
@@ -302,7 +314,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                     replay_buffer=self.replay_buffer,
                     log_interval=log_interval,
                 )
-
                 if rollout.continue_training is False:
                     break
 
@@ -319,13 +330,13 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 self.num_timesteps += gradient_steps
                 # Special case when the user passes `gradient_steps=0`
                 if gradient_steps > 0:
-                    self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
+                    self.offline_train(batch_size=self.batch_size, gradient_steps=gradient_steps)
                 else:
                     break
                 for _ in range(gradient_steps):
                     callback.on_step()
-                if log_interval is not None and self.num_timesteps % log_interval == 0:
-                    self._dump_logs()
+                # if log_interval is not None and self.num_timesteps % log_interval == 0:
+                #     self._dump_logs()
 
         callback.on_training_end()
         return self
@@ -335,6 +346,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         Sample the replay buffer and do the updates
         (gradient descent and update target networks)
         """
+        raise NotImplementedError()
+
+    def offline_train(self, gradient_steps: int, batch_size: int) -> None:
         raise NotImplementedError()
 
     def _sample_action(
@@ -419,6 +433,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         reward: np.ndarray,
         dones: np.ndarray,
         infos: List[Dict[str, Any]],
+        metla_normalizing: float = 1.0
     ) -> None:
         """
         Store transition in the replay buffer.
@@ -463,15 +478,15 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                         next_obs[i] = self._vec_normalize_env.unnormalize_obs(next_obs[i, :])
 
         replay_buffer.add(
-            self._last_original_obs,
-            next_obs,
+            self._last_original_obs / metla_normalizing,
+            next_obs / metla_normalizing,
             buffer_action,
             reward_,
             dones,
             infos,
         )
 
-        self._last_obs = new_obs
+        self._last_obs = new_obs.copy()
         # Save the unnormalized observation
         if self._vec_normalize_env is not None:
             self._last_original_obs = new_obs_
@@ -518,7 +533,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         # Vectorize action noise if needed
         if action_noise is not None and env.num_envs > 1 and not isinstance(action_noise, VectorizedActionNoise):
             action_noise = VectorizedActionNoise(action_noise, env.num_envs)
-
 
         callback.on_rollout_start()
         continue_training = True
@@ -571,3 +585,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_rollout_end()
 
         return RolloutReturn(num_collected_steps * env.num_envs, num_collected_episodes, continue_training)
+
+    def _get_jax_load_params(self) -> List[str]:
+        raise NotImplementedError
+
+    def _get_jax_save_params(self) -> Dict[str, Params]:
+        raise NotImplementedError

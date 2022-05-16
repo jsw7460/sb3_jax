@@ -15,9 +15,11 @@ from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
 from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
 from offline_baselines_jax.sac.policies import SACPolicy
 
+
 def log_prob_correction(x: jnp.ndarray) -> jnp.ndarray:
     # Squash correction (from original SAC implementation)
     return jnp.sum(jnp.log(1.0 - jnp.tanh(x) ** 2 + 1e-6), axis=1)
+
 
 class LogAlphaCoef(nn.Module):
     init_value: float = 1.0
@@ -27,6 +29,7 @@ class LogAlphaCoef(nn.Module):
         log_temp = self.param('log_alpha', init_fn=lambda key: jnp.full((), jnp.log(self.init_value)))
         return log_temp
 
+
 class LogEntropyCoef(nn.Module):
     init_value: float = 1.0
     num_tasks: int = 10
@@ -35,6 +38,7 @@ class LogEntropyCoef(nn.Module):
     def __call__(self, task_id: jnp.array) -> jnp.ndarray:
         log_temp = self.param('log_temp', init_fn=lambda key: jnp.full((self.num_tasks, ), jnp.log(self.init_value)))
         return jnp.sum(log_temp * task_id, keepdims=True, axis=1)
+
 
 def log_alpha_update(log_alpha_coef: Model, conservative_loss: float) -> Tuple[Model, InfoDict]:
     def alpha_loss_fn(alpha_params: Params):
@@ -46,6 +50,7 @@ def log_alpha_update(log_alpha_coef: Model, conservative_loss: float) -> Tuple[M
     new_alpha_coef, info = log_alpha_coef.apply_gradient(alpha_loss_fn)
     new_alpha_coef = param_clip(new_alpha_coef, 1e+6)
     return new_alpha_coef, info
+
 
 def log_ent_coef_update(key:Any, log_ent_coef: Model, actor:Model , target_entropy: float, replay_data:ReplayBufferSamples,
                         task_id: jnp.array) -> Tuple[Model, InfoDict]:
@@ -147,9 +152,11 @@ def target_update(critic: Model, critic_target: Model, tau: float) -> Model:
     new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), critic.params, critic_target.params)
     return critic_target.replace(params=new_target_params)
 
+
 def param_clip(log_alpha_coef: Model, a_max: float) -> Model:
     new_log_alpha_params = jax.tree_multimap(lambda p: jnp.clip(p, a_max=jnp.log(a_max)), log_alpha_coef.params)
     return log_alpha_coef.replace(params=new_log_alpha_params)
+
 
 @functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update',
                                              'alpha_update', 'conservative_weight', 'lagrange_thresh'))

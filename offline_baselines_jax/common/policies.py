@@ -23,10 +23,12 @@ class Model:
     opt_state: Optional[optax.OptState] = None
 
     @classmethod
-    def create(cls,
-               model_def: nn.Module,
-               inputs: Sequence[jnp.ndarray],
-               tx: Optional[optax.GradientTransformation] = None) -> 'Model':
+    def create(
+        cls,
+        model_def: nn.Module,
+        inputs: Sequence[jnp.ndarray],
+        tx: Optional[optax.GradientTransformation] = None
+    ) -> 'Model':
         variables = model_def.init(*inputs)
 
         _, params = variables.pop('params')
@@ -36,11 +38,7 @@ class Model:
         else:
             opt_state = None
 
-        return cls(step=1,
-                   apply_fn=model_def.apply,
-                   params=params,
-                   tx=tx,
-                   opt_state=opt_state)
+        return cls(step=1, apply_fn=model_def.apply, params=params, tx=tx, opt_state=opt_state)
 
     def __call__(self, *args, **kwargs):
         return self.apply_fn({'params': self.params}, *args, **kwargs)

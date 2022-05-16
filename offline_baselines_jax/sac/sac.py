@@ -1,3 +1,11 @@
+from copy import deepcopy
+from stable_baselines3.common.noise import ActionNoise
+
+import time
+from offline_baselines_jax.common.buffers import ReplayBuffer
+from offline_baselines_jax.common.utils import configure_logger
+from offline_baselines_jax.sac.policies import SACPolicy
+from offline_baselines_jax.metla.buffer import TrajectoryBuffer
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import gym
@@ -12,7 +20,14 @@ from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
 from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
-from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
+from offline_baselines_jax.common.type_aliases import (
+    GymEnv,
+    MaybeCallback,
+    Schedule,
+    InfoDict,
+    ReplayBufferSamples,
+    Params
+)
 from offline_baselines_jax.sac.policies import SACPolicy
 
 
@@ -24,7 +39,8 @@ class LogEntropyCoef(nn.Module):
         log_temp = self.param('log_temp', init_fn=lambda key: jnp.full((), jnp.log(self.init_value)))
         return log_temp
 
-def log_ent_coef_update(key:Any, log_ent_coef: Model, actor:Model , target_entropy: float, replay_data:ReplayBufferSamples) -> Tuple[Model, InfoDict]:
+
+def log_ent_coef_update(key:Any, log_ent_coef: Model, actor: Model , target_entropy: float, replay_data:ReplayBufferSamples) -> Tuple[Model, InfoDict]:
     def temperature_loss_fn(ent_params: Params):
         dist = actor(replay_data.observations)
         actions_pi = dist.sample(seed=key)
@@ -38,7 +54,8 @@ def log_ent_coef_update(key:Any, log_ent_coef: Model, actor:Model , target_entro
     new_ent_coef, info = log_ent_coef.apply_gradient(temperature_loss_fn)
     return new_ent_coef, info
 
-def sac_actor_update(key: int, actor: Model, critic:Model, log_ent_coef: Model, replay_data:ReplayBufferSamples):
+
+def sac_actor_update(key: int, actor: Model, critic: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples):
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist = actor.apply_fn({'params': actor_params}, replay_data.observations)
         actions_pi = dist.sample(seed=key)
@@ -55,8 +72,9 @@ def sac_actor_update(key: int, actor: Model, critic:Model, log_ent_coef: Model, 
     new_actor, info = actor.apply_gradient(actor_loss_fn)
     return new_actor, info
 
+
 def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model,
-                      replay_data:ReplayBufferSamples, gamma:float):
+                      replay_data: ReplayBufferSamples, gamma:float):
     dist = actor(replay_data.next_observations)
     next_actions = dist.sample(seed=key)
     next_log_prob = dist.log_prob(next_actions)
@@ -236,6 +254,25 @@ class SAC(OffPolicyAlgorithm):
         if _init_setup_model:
             self._setup_model()
 
+        # Entropy coefficient / Entropy temperature
+        # Inverse of the reward scale
+        self.ent_coef = ent_coef
+        self.target_update_interval = target_update_interval
+        self.entropy_update = True
+        self.latent_dim = None
+
+        self.observation_dim = -1
+        self.action_dim = -1
+        self.offline_data_normalizing = None
+
+        self.online_finetune_init = True
+        self.online_finetune_step = None
+        self.online_learning_starts = 20
+
+        self._last_observation = None
+        self._history_observations = []
+        self._history_actions = []
+
     def _setup_model(self) -> None:
         super(SAC, self)._setup_model()
         self._create_aliases()
@@ -273,7 +310,6 @@ class SAC(OffPolicyAlgorithm):
             self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key])
             self.entropy_update = False
 
-
     def _create_aliases(self) -> None:
         self.actor = self.policy.actor
         self.critic = self.policy.critic
@@ -285,9 +321,10 @@ class SAC(OffPolicyAlgorithm):
 
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
-            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+            # replay_data = self.replay_buffer.sample(batch_size, history_len=20, future_len=7)
+            replay_data = self.replay_buffer.sample(batch_size=batch_size)
+            # replay_data = self.replay_buffer.history_reward_sample(batch_size=batch_size, history_len=7, st_future_len=20)
             self.key, key = jax.random.split(self.key, 2)
-
             target_update_cond = gradient_step % self.target_update_interval == 0
             self.key, new_actor, new_critic, new_critic_target, new_log_ent_coef, info \
                 = _update_jit(key, self.actor, self.critic, self.critic_target, self.log_ent_coef, replay_data,
@@ -304,7 +341,6 @@ class SAC(OffPolicyAlgorithm):
             self.log_ent_coef = new_log_ent_coef
 
             self._create_aliases()
-
         self._n_updates += gradient_steps
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/ent_coef", np.mean(ent_coefs))

@@ -262,7 +262,6 @@ class BaseAlgorithm(ABC):
         """
         self._current_progress_remaining = 1.0 - float(num_timesteps) / float(total_timesteps)
 
-
     def _excluded_save_params(self) -> List[str]:
         """
         Returns the names of the parameters that should be excluded from being

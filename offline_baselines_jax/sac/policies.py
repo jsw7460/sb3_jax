@@ -10,8 +10,7 @@ import flax.linen as nn
 import jax.numpy as jnp
 import numpy as np
 from tensorflow_probability.substrates import jax as tfp
-tfd = tfp.distributions
-tfb = tfp.bijectors
+
 
 from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.preprocessing import get_action_dim
@@ -26,16 +25,23 @@ from offline_baselines_jax.common.jax_layers import (
 )
 from offline_baselines_jax.common.type_aliases import Schedule, Params
 
+tfd = tfp.distributions
+tfb = tfp.bijectors
 # CAP the standard deviation of the actor
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
-@functools.partial(jax.jit, static_argnames=('actor_apply_fn'))
-def sample_actions(rng: int, actor_apply_fn: Callable[..., Any], actor_params: Params,
-                    observations: np.ndarray,) -> Tuple[int, jnp.ndarray]:
+
+@functools.partial(jax.jit, static_argnames=('actor_apply_fn',))
+def sample_actions(
+        rng: int, actor_apply_fn: Callable[..., Any],
+        actor_params: Params,
+        observations: np.ndarray
+) -> Tuple[int, jnp.ndarray]:
     dist = actor_apply_fn({'params': actor_params}, observations)
     rng, key = jax.random.split(rng)
     return rng, dist.sample(seed=key)
+
 
 class Actor(nn.Module):
     """
@@ -83,6 +89,7 @@ class Critic(nn.Module):
         q_value = create_mlp(1, self.net_arch, self.activation_fn)(inputs)
         return q_value
 
+
 class DoubleCritic(nn.Module):
     features_extractor: nn.Module
     net_arch: List[int]
@@ -99,6 +106,7 @@ class DoubleCritic(nn.Module):
                              axis_size=self.n_critics)
         qs = VmapCritic(self.features_extractor, self.net_arch, self.activation_fn, **kwargs)(states, actions)
         return qs
+
 
 class SACPolicy(object):
     """
@@ -212,6 +220,7 @@ class SACPolicy(object):
         """
         low, high = self.action_space.low, self.action_space.high
         return low + (0.5 * (scaled_action + 1.0) * (high - low))
+
 
 MlpPolicy = SACPolicy
 

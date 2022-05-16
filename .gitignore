@@ -1,49 +1,68 @@
-*.swp
-*.pyc
-*.pkl
-*.py~
-*.bak
-.pytest_cache
-.DS_Store
-.idea
-.vscode
-.coverage
-.coverage.*
+# Byte-compiled / optimized / DLL files
 __pycache__/
-_build/
-*.npz
-*.pth
-.pytype/
-git_rewrite_commit_history.sh
+*/__pycache__/*
+*.py[cod]
 
-# Setuptools distribution and build folders.
-/dist/
-/build
-keys/
+# C extensions
+*.so
 
-# Virtualenv
-/env
-/venv
+# Distribution / packaging
+bin/
+build/
+develop-eggs/
+dist/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
 
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
 
-*.sublime-project
-*.sublime-workspace
-
-.idea
-
-logs/
-
-.ipynb_checkpoints
-ghostdriver.log
-
-htmlcov
-
-junk
-src
-
-*.egg-info
+# Unit test / coverage reports
+.tox/
+.coverage
 .cache
-*.lprof
-*.prof
+nosetests.xml
+coverage.xml
 
-MUJOCO_LOG.TXT
+# Translations
+*.mo
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Rope
+.ropeproject
+
+# Django stuff:
+*.log
+*.pot
+
+# Sphinx documentation
+docs/_build/
+
+
+2dnavi.py
+2dnavioff.py
+foo*
+online.py
+server.py
+client.py
+gail/
+goal*
+rndtest.py
+tests/
+_navigation_2d/
+envs/
+multiworld/
+backup/
+runs/

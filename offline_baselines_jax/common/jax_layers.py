@@ -95,27 +95,34 @@ class ModuleLayer(nn.Module):
 
 
 class MLP(nn.Module):
-    net_arch: List[int]
-    activation_fn: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
-    squash_output: bool = False
-    last_activation: bool = False
+    net_arch: List
+    activation_fn: nn.Module
+    dropout: float = 0.0
+    squashed_out: bool = False
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        for i, size in enumerate(self.net_arch):
-            x = nn.Dense(size, kernel_init=default_init())(x)
-            if i + 1 < len(self.net_arch) or self.last_activation:
-                x = self.activation_fn(x)
-        if self.squash_output:
-            x = nn.tanh(x)
-        return x
+    def __call__(self, x, deterministic: bool = False):
+        for feature in self.net_arch[:-1]:
+            x = self.activation_fn(nn.Dense(feature, kernel_init=default_init())(x))
+            x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
+        x = nn.Dense(self.net_arch[-1], kernel_init=default_init())(x)
+        if self.squashed_out:
+            return nn.tanh(x)
+        else:
+            return x
 
-def create_mlp(output_dim: int, net_arch: List[int], activation_fn: Type[nn.Module] = nn.relu,
-               squash_output: bool = False) -> nn.Module:
+
+def create_mlp(
+    output_dim: int,
+    net_arch: List[int],
+    activation_fn: Type[nn.Module] = nn.relu,
+    dropout: float = 0.0,
+    squash_output: bool = False,
+) -> nn.Module:
     if output_dim > 0:
         net_arch = list(net_arch)
         net_arch.append(output_dim)
-    return MLP(net_arch, activation_fn, squash_output)
+    return MLP(net_arch, activation_fn, dropout, squash_output)
 
 
 class CombinedExtractor(BaseFeaturesExtractor):
@@ -174,6 +181,11 @@ def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> T
         See above for details on its formatting.
     :return: The network architectures for the actor and the critic
     """
+    try:
+        net_arch = list(net_arch)
+    except:
+        pass
+
     if isinstance(net_arch, list):
         actor_arch, critic_arch = net_arch, net_arch
     else:
