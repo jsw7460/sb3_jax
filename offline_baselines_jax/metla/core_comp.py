@@ -5,13 +5,14 @@ import jax.numpy as jnp
 
 from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.type_aliases import InfoDict, Params, ReplayBufferSamples
-from .networks import WassersteinAutoEncoder
-from gym.spaces import Box
+from .networks import WassersteinAutoEncoder, GaussianSkillPrior
 
 EPS = 1e-5
 USE_GOAL_REACHING_LOSS = 1.0
 GAE_LE_COEFS = 1.0
-RAND_QVAL_COEF = 1.0
+RAND_QVAL_COEF = 0.0
+BC_IGNORE = 1.0
+PRIOR_COEF = 1.0
 
 
 def update_td3_higher_actor(
@@ -188,6 +189,92 @@ def update_td3_finetune_layer(
     return new_finetune_layer, finetune_info
 
 
+def update_sac_style_higher_actor_critic(
+    gamma: float,
+    rng: jnp.ndarray,
+    second_ae: Model,
+    higher_actor: Model,
+    higher_critic: Model,
+    higher_critic_target: Model,
+    observations: jnp.ndarray,
+    higher_actions: jnp.ndarray,
+    next_observations: jnp.ndarray,
+    rewards: jnp.ndarray,
+    dones: jnp.ndarray,
+):
+    rng, dropout_key, sampling_key = jax.random.split(rng, 3)
+
+    prior_higher_action = second_ae(
+        observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key, "sampling": sampling_key},
+        method=GaussianSkillPrior.predict
+    )
+    prior_higher_action = jnp.clip(prior_higher_action, -10 + EPS, 10 - EPS)
+
+    next_higher_action = higher_actor(
+        next_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key, "sampling": sampling_key},
+        method=GaussianSkillPrior.predict
+    )
+
+    next_q_values = higher_critic_target(
+        next_observations,
+        next_higher_action,
+        deterministic=False,
+        rngs={"dropout": dropout_key}
+    )
+
+    next_q_values = jnp.min(next_q_values, axis=1)
+
+    target_q_values = rewards + gamma * (1 - dones) * next_q_values
+
+    # Train higher critic first
+    def higher_critic_loss_fn(params: Params) -> Tuple[jnp.ndarray, Dict]:
+        current_q_values = higher_critic.apply_fn(
+            {"params": params},
+            observations,
+            higher_actions,
+            deterministic=False,
+            rngs={"dropout": dropout_key}
+        )
+        n_qs = current_q_values.shape[1]
+        critic_loss = jnp.mean(sum([(target_q_values - current_q_values[:, i, :]) ** 2 for i in range (n_qs)]))
+        critic_loss = critic_loss / n_qs
+
+        return critic_loss, {"critic_loss": critic_loss}
+
+    higher_critic, higher_critic_info = higher_critic.apply_gradient(higher_critic_loss_fn)
+
+    # Next, train the policy
+    def higher_actor_loss_fn(params: Params) -> Tuple[jnp.ndarray, Dict]:
+        print("OBS", observations)
+        print("Params", higher_actor.params["latent_pi"]["Dense_0"])
+        higher_actions_dist, (mean, log_std) = higher_actor.apply_fn(
+            {"params": params},
+            observations,
+            deterministic=False,
+            rngs={"dropout": dropout_key, "sampling": sampling_key},
+        )
+        prior_loss = - jnp.mean(higher_actions_dist.log_prob(prior_higher_action))
+        # print("PRIOR LOSS", prior_loss)
+        print("MEAN", mean)
+        print("=" * 80)
+        print("STD", log_std)
+
+        higher_actions_pi = higher_actions_dist.sample(seed=sampling_key)
+        actor_loss = - jnp.mean(higher_critic(observations, higher_actions_pi, deterministic=False)) * 0
+        higher_actor_loss = actor_loss + PRIOR_COEF * prior_loss
+        return higher_actor_loss, {
+            "actor_loss": higher_actor_loss, "neg_q_val_loss": actor_loss, "prior_loss": prior_loss
+        }
+
+    higher_actor, higher_actor_info = higher_actor.apply_gradient(higher_actor_loss_fn)
+
+    return higher_actor, higher_critic, higher_actor_info, higher_critic_info
+
+
 def update_td3_higher_actor_critic_higher_actor(
     gamma: float,
     rng: jnp.ndarray,
@@ -210,11 +297,12 @@ def update_td3_higher_actor_critic_higher_actor(
     current = jnp.hstack((observations, actions))[:, jnp.newaxis, :]
     history_for_next_timestep = jnp.concatenate((history_for_next_timestep, current), axis=1)
 
-    next_higher_actions, _ = higher_actor(
+    next_higher_actions = higher_actor(
         history_for_next_timestep,
         next_observations,
         deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
+        rngs={"dropout": dropout_key, "noise": noise_key},
+        method=GaussianSkillPrior.predict
     )
 
     next_q_values = higher_critic_target(
@@ -245,7 +333,7 @@ def update_td3_higher_actor_critic_higher_actor(
     new_higher_critic, higher_critic_info = higher_critic.apply_gradient(higher_critic_loss_fn)
 
     def higher_actor_loss_fn(params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        higher_actions_pi, _ = higher_actor.apply_fn(
+        higher_actions_pi, *_ = higher_actor.apply_fn(
             {"params": params},
             history_input,
             observations,
@@ -266,214 +354,6 @@ def update_td3_higher_actor_critic_higher_actor(
 
     info = {**higher_critic_info, **finetune_layer_actor_info}
     return new_finetune_layer, new_higher_critic, info
-
-
-def update_td3_higher_actor_critic_last_layer(
-    gamma: float,
-    rng: jnp.ndarray,
-    finetune_layer: Model,             # View it as an actor
-    second_ae: Model,
-    higher_critic: Model,
-    higher_critic_target: Model,
-    history_observations: jnp.ndarray,
-    history_actions: jnp.ndarray,
-    observations: jnp.ndarray,
-    actions: jnp.ndarray,
-    next_observations: jnp.ndarray,
-    rewards: jnp.ndarray,
-    dones: jnp.ndarray,
-):
-    rng, dropout_key, noise_key = jax.random.split(rng, 3)
-    history_input = jnp.concatenate((history_observations, history_actions), axis=2)
-
-    current_first_pred_goal, _ = second_ae(
-        history_input,
-        observations,
-        deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
-    )
-
-    history_for_next_timestep = history_input[:, 1:, ...]
-    current = jnp.hstack((observations, actions))[:, jnp.newaxis, :]
-    history_for_next_timestep = jnp.concatenate((history_for_next_timestep, current), axis=1)
-
-    next_first_pred_goal, _ = second_ae(
-        history_for_next_timestep,
-        next_observations,
-        deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
-    )
-
-    current_conditioned_latent = finetune_layer(current_first_pred_goal, deterministic=False)
-    next_conditioned_latent = finetune_layer(next_first_pred_goal, deterministic=False)
-
-    next_q_values = higher_critic_target(
-        next_observations,
-        next_conditioned_latent,
-        deterministic=False,
-        rngs={"dropout": dropout_key}
-    )
-    next_q_values = jnp.min(next_q_values, axis=1)
-    target_q_values = rewards + gamma * (1 - jnp.squeeze(dones)) * jnp.squeeze(next_q_values)
-
-    def higher_critic_loss_fn(params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        q_values = higher_critic.apply_fn(
-            {"params": params},
-            observations,
-            current_conditioned_latent,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-
-        n_qs = q_values.shape[1]
-        higher_critic_loss \
-            = sum([jnp.mean((target_q_values - q_values[:, i, :].squeeze())) ** 2 for i in range(n_qs)]) / n_qs
-        higher_critic_loss = (higher_critic_loss / len(q_values))
-
-        return higher_critic_loss, {"critic_loss": higher_critic_loss}
-    new_higher_critic, higher_critic_info = higher_critic.apply_gradient(higher_critic_loss_fn)
-
-    def higher_actor_loss_fn(params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        current_conditioned_latent_grad = finetune_layer.apply_fn(
-            {"params": params},
-            current_first_pred_goal,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-        higher_actor_loss = -higher_critic(
-            observations,
-            current_conditioned_latent_grad,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )[:, 0, ...]
-        higher_actor_loss = jnp.mean(higher_actor_loss)
-
-        return higher_actor_loss, {"actor_loss": higher_actor_loss}
-
-    new_finetune_layer, finetune_layer_actor_info = finetune_layer.apply_gradient(higher_actor_loss_fn)
-
-    info = {**higher_critic_info, **finetune_layer_actor_info}
-    return new_finetune_layer, new_higher_critic, info
-
-
-def update_sac_last_layer(
-    gamma: float,
-    key: jnp.ndarray,
-    log_ent_coef: Model,
-    finetune_last_layer: Model,
-    second_ae: Model,
-    actor: Model,
-    critic: Model,
-    critic_target: Model,
-    history_observations: jnp.ndarray,
-    history_actions: jnp.ndarray,
-    observations: jnp.ndarray,
-    actions: jnp.ndarray,
-    next_observations: jnp.ndarray,
-    rewards: jnp.ndarray,
-    dones: jnp.ndarray,
-):
-    rng, dropout_key, noise_key = jax.random.split(key, 3)
-    history_input = jnp.concatenate((history_observations, history_actions), axis=2)
-
-    current_first_pred_goal, _ = second_ae(
-        history_input,
-        observations,
-        deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
-    )
-
-    last_dropout_key, actor_dropout_key = jax.random.split(dropout_key, 2)
-
-    history_for_next_timestep = history_input[:, 1:, ...]
-    current = jnp.hstack((observations, actions))[:, jnp.newaxis, :]
-    history_for_next_timestep = jnp.concatenate((history_for_next_timestep, current), axis=1)
-
-    next_first_pred_goal, _ = second_ae(
-        history_for_next_timestep,
-        next_observations,
-        deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
-    )
-
-    def last_layer_loss_fn(params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        current_conditioned_latent = finetune_last_layer.apply_fn(
-            {"params": params},
-            current_first_pred_goal,
-            deterministic=False,
-            rngs={"dropout": last_dropout_key}
-        )
-
-        prior_loss = jnp.mean((current_conditioned_latent - current_first_pred_goal) ** 2)
-
-        next_conditioned_latent = finetune_last_layer.apply_fn(
-            {"params": params},
-            next_first_pred_goal,
-            deterministic=False,
-            rngs={"dropout": last_dropout_key}
-        )
-
-        action_dist = actor(
-            observations,
-            current_conditioned_latent,
-            deterministic=False,
-            rngs={"dropout": actor_dropout_key}
-        )
-        actions_pi = action_dist.sample(seed=key)
-        log_prob = action_dist.log_prob(actions_pi)
-
-        next_action_dist = actor(
-            next_observations,
-            next_conditioned_latent,
-            deterministic=False,
-            rngs={"dropout": actor_dropout_key}
-        )
-        next_action = next_action_dist.sample(seed=key)
-        next_log_prob = next_action_dist.log_prob(next_action)
-
-        next_q_values = critic_target(
-            next_observations,
-            next_conditioned_latent,
-            next_action,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-
-        next_q_values = jnp.min(next_q_values, axis=1)
-        ent_coef = jnp.exp(log_ent_coef())
-        next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
-
-        target_q_values = jnp.squeeze(rewards) + gamma * (1 - jnp.squeeze(dones)) * jnp.squeeze(next_q_values)
-
-        q_values = critic(
-            observations,
-            current_conditioned_latent,
-            actions_pi,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-        n_qs = q_values.shape[1]
-
-        critic_loss = sum([(target_q_values - q_values[:, i, :].squeeze()) ** 2 for i in range(n_qs)])
-        critic_loss = jnp.mean(critic_loss)
-
-        critic_loss = (critic_loss / len(q_values))
-
-        min_qf_pi = jnp.min(q_values, axis=1)
-        actor_loss = jnp.mean(ent_coef * log_prob - min_qf_pi)
-
-        last_layer_loss = critic_loss + actor_loss + (prior_loss * 100)
-        return last_layer_loss, {
-                "last_layer_loss": last_layer_loss,
-                "next_q_values": next_q_values,
-                "prior_loss": prior_loss,
-                "actor_loss": actor_loss,
-                "critic_loss": critic_loss,
-            }
-
-    new_finetune_last_layer, last_layer_info = finetune_last_layer.apply_gradient(last_layer_loss_fn)
-
-    return new_finetune_last_layer, last_layer_info
 
 
 def log_ent_coef_update(
@@ -587,8 +467,10 @@ def update_gae(
     rng: jnp.ndarray,
     ae: Model,
     history_observations: jnp.ndarray,
+    history_actions: jnp.ndarray,
     observations: jnp.ndarray,
     future_observations: jnp.ndarray,
+    future_actions: jnp.ndarray,
     n_nbd: int = 5,
     **kwargs,
 ) -> Tuple[Model, Dict]:            # Observation으로 현재 timestep observation의 neighborhood를 reconstruct
@@ -619,10 +501,15 @@ def update_gae(
     # [batch_size, 2 * n_nbd + 1, state_dim]
     nbds = jnp.concatenate((history_nbd, observations[:, jnp.newaxis, :], future_nbd), axis=1)
 
+    history = jnp.concatenate((history_observations, history_actions), axis=2)
+    future = jnp.concatenate((future_observations, future_actions), axis=2)
+
     def gae_loss_fn(params: Params) -> Tuple[jnp.ndarray, Dict]:
         target_pred, latent = ae.apply_fn(
             {"params": params},
+            history,
             observations,
+            future,
             deterministic=False,
             rngs={"dropout": dropout_key}
         )
@@ -659,6 +546,33 @@ def update_sas(
 
     new_actor, info = sas_predictor.apply_gradient(sas_predictor_loss_fn)
     return new_actor, info
+
+
+def update_skill_prior(
+    rng: jnp.ndarray,
+    skill_prior: Model,
+    observations: jnp.ndarray,
+    recon_target: jnp.ndarray,
+    **kwargs
+):
+    recon_target = recon_target.clip(-1 + EPS, 1 - EPS)
+    rng, dropout_key = jax.random.split(rng)
+    def skill_prior_loss_fn(params: Params) -> Tuple[jnp.ndarray, Dict]:
+        sampling_dist, (mean_action, log_std) = skill_prior.apply_fn(
+            {"params": params},
+            observations,
+            deterministic=False,
+            rngs={"dropout": dropout_key}
+        )
+        log_likelihood = sampling_dist.log_prob(recon_target)
+        skill_prior_loss = - jnp.mean(log_likelihood)
+
+        return skill_prior_loss, {"skill_prior_loss": skill_prior_loss, "skill_log_likelihood": log_likelihood,
+                                  "skill_mean": jnp.mean(mean_action), "skill_log_std": jnp.mean(log_std)}
+
+    new_second_ae, second_ae_info = skill_prior.apply_gradient(skill_prior_loss_fn)
+    return new_second_ae, second_ae_info
+
 
 
 def update_wae(
@@ -806,7 +720,6 @@ def update_wae_by_td3_policy_grad_flow(
     return new_second_ae, second_ae_info
 
 
-@jax.jit
 def update_gae_by_td3_policy_grad_flow(
     gamma: float,
     rng: jnp.ndarray,
@@ -814,28 +727,31 @@ def update_gae_by_td3_policy_grad_flow(
     actor_target: Model,
     critic: Model,
     critic_target: Model,
+    history_observations: jnp.ndarray,
+    history_actions: jnp.ndarray,
     observations: jnp.ndarray,
+    future_observations: jnp.ndarray,
+    future_actions: jnp.ndarray,
     actions: jnp.ndarray,
     next_observations: jnp.ndarray,
     latent_next_observation: jnp.ndarray,           # 이거 fix 시키자
     latent_goal_observation: jnp.ndarray,
     dones: jnp.ndarray,
+    next_conditioned_latent: jnp.ndarray,
     target_noise: float,
     target_noise_clip: float,
     **kwargs,
 ):
     rng, dropout_key, sampling_key, noise_key = jax.random.split(rng, 4)
+    history = jnp.concatenate((history_observations, history_actions), axis=2)
+    future = jnp.concatenate((future_observations, future_actions), axis=2)
 
     def gae_grad_flow_loss_fn(params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         _, current_conditioned_latent = ae.apply_fn(
             {"params": params},
+            history,
             observations,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-        _, next_conditioned_latent = ae.apply_fn(
-            {"params": params},
-            next_observations,
+            future,
             deterministic=False,
             rngs={"dropout": dropout_key}
         )
@@ -1230,7 +1146,6 @@ def update_td3_critic(
     target_noise_clip: float,
 ):
     rng, dropout_key, sampling_key, noise_key = jax.random.split(rng, 4)
-
     next_actions = actor_target(
         next_observations,
         next_conditioned_latent,
@@ -1349,7 +1264,7 @@ def update_td3_actor(
             rngs={"dropout": dropout_key}
         )
 
-        bc_loss = jnp.mean((actions_pi - actions) ** 2) * update_flag
+        bc_loss = jnp.mean((actions_pi - actions) ** 2) * update_flag * BC_IGNORE
         return bc_loss, {"bc_loss": bc_loss}
 
     new_actor, bc_loss_info = new_actor.apply_gradient(bc_loss_fn)

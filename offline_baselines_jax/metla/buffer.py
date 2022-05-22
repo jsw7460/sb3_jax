@@ -430,7 +430,8 @@ class TrajectoryBuffer(BaseBuffer):
 
     @staticmethod
     def timestep_marking(
-        history: jnp.ndarray,
+        x: jnp.ndarray,
+        backward: int,
     ) -> jnp.ndarray:
         """
         History: [batch_size, len_subtraj, obs_dim + action_dim]
@@ -443,12 +444,15 @@ class TrajectoryBuffer(BaseBuffer):
         For history --> -1, -2, -3, ...
         For future --> +1, +2, +3, ...
         """
-        batch_size, len_subtraj, _ = history.shape
-        history_marker = jnp.arange(-len_subtraj, 0)[None, ...] / len_subtraj
-        history_marker = jnp.repeat(history_marker, repeats=batch_size, axis=0)[..., None]
-        history = jnp.concatenate((history, history_marker), axis=2)
+        # assert x.ndim == 3, "x should have a shape [batch, len_subtraj, dim]"
+        batch_size, len_subtraj, _ = x.shape
+        marker = jnp.arange(0, len_subtraj)[None, ...] / len_subtraj
+        for _ in range(backward):
+            marker = jnp.flip(marker, axis=1)
+        marker = jnp.repeat(marker, repeats=batch_size, axis=0)[..., None]
+        x = jnp.concatenate((x, marker), axis=2)
 
-        return history
+        return x
 
     def add(
         self,

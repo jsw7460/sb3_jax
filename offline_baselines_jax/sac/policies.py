@@ -44,93 +44,107 @@ def sample_actions(
 
 
 class Actor(nn.Module):
-    """
-    Actor network (policy) for SAC.
-
-    :param observation_space: Obervation space
-    :param action_space: Action space
-    :param net_arch: Network architecture
-    :param features_extractor: Network to extract features
-        (a CNN when using images, a nn.Flatten() layer otherwise)
-    :param features_dim: Number of features
-    :param activation_fn: Activation function
-    :param normalize_images: Whether to normalize images or not,
-         dividing by 255.0 (True by default)
-    """
     features_extractor: nn.Module
     action_space: gym.spaces.Space
     net_arch: List[int]
     activation_fn: Type[nn.Module] = nn.relu
+    dropout: float = 0.0
 
-    @nn.compact
-    def __call__(self, observations: jnp.ndarray, **kwargs) -> jnp.ndarray:
-        # Save arguments to re-create object at loading
-        features = self.features_extractor(observations, **kwargs)
+    latent_pi = None
+    mu = None
+    log_std = None
+
+    def setup(self):
+        self.latent_pi = create_mlp(-1, self.net_arch, self.activation_fn, self.dropout)
         action_dim = get_action_dim(self.action_space)
-        latent_pi = create_mlp(-1, self.net_arch, self.activation_fn)(features)
+        self.mu = create_mlp(action_dim, self.net_arch, self.activation_fn, self.dropout)
+        self.log_std = create_mlp(action_dim, self.net_arch, self.activation_fn, self.dropout)
 
-        mu = nn.Dense(action_dim, kernel_init=default_init())(latent_pi)
-        log_std = nn.Dense(action_dim, kernel_init=default_init())(latent_pi)
-        log_std = jnp.clip(log_std, LOG_STD_MIN, LOG_STD_MAX)
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
 
-        base_dist = tfd.MultivariateNormalDiag(loc=mu, scale_diag=jnp.exp(log_std))
-        return tfd.TransformedDistribution(distribution=base_dist, bijector=tfb.Tanh())
+    def forward(self, observations: jnp.ndarray, deterministic: bool = False, **kwargs) -> jnp.ndarray:
+        mean_actions, log_stds = self.get_action_dist_params(observations, deterministic=deterministic, **kwargs)
+        return self.actions_from_params(mean_actions, log_stds)
+
+    def get_action_dist_params(
+        self,
+        observations: jnp.ndarray,
+        deterministic: bool = False,
+        **kwargs,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        features = self.features_extractor(observations, **kwargs)
+
+        latent_pi = self.latent_pi(features, deterministic=deterministic)
+        mean_actions = self.mu(latent_pi, deterministic=deterministic)
+        log_stds = self.log_std(latent_pi, deterministic=deterministic)
+        log_stds = jnp.clip(log_stds, LOG_STD_MIN, LOG_STD_MAX)
+        return mean_actions, log_stds
+
+    def actions_from_params(self, mean: jnp.ndarray, log_std: jnp.ndarray):
+        base_dist = tfd.MultivariateNormalDiag(loc=mean, scale_diag=jnp.exp(log_std))
+        sampling_dist = tfd.TransformedDistribution(distribution=base_dist, bijector=tfb.Tanh())
+        return sampling_dist
+
+
+
+class SingleCritic(nn.Module):
+    features_extractor: nn.Module
+    net_arch: List[int]
+    dropout: float
+    activation_fn: Type[nn.Module] = nn.relu
+
+    q_net = None
+
+    def setup(self):
+        self.q_net = create_mlp(
+            output_dim=1,
+            net_arch=self.net_arch,
+            dropout=self.dropout
+        )
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+    def forward(
+        self,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        deterministic: bool = False
+    ):
+        q_input = jnp.concatenate((observations, actions), axis=1)
+        return self.q_net(q_input, deterministic=deterministic)
 
 
 class Critic(nn.Module):
     features_extractor: nn.Module
     net_arch: List[int]
-    activation_fn: Type[nn.Module] = nn.relu
-
-    @nn.compact
-    def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, **kwargs) -> jnp.ndarray:
-        features = self.features_extractor(observations, **kwargs)
-        inputs = jnp.concatenate([features, actions], -1)
-        q_value = create_mlp(1, self.net_arch, self.activation_fn)(inputs)
-        return q_value
-
-
-class DoubleCritic(nn.Module):
-    features_extractor: nn.Module
-    net_arch: List[int]
+    dropout: float = 0.0
     activation_fn: Type[nn.Module] = nn.relu
     n_critics: int = 2
 
-    @nn.compact
-    def __call__(self, states, actions, **kwargs):
-        VmapCritic = nn.vmap(Critic,
-                             variable_axes={'params': 0},
-                             split_rngs={'params': True},
-                             in_axes=None,
-                             out_axes=0,
-                             axis_size=self.n_critics)
-        qs = VmapCritic(self.features_extractor, self.net_arch, self.activation_fn, **kwargs)(states, actions)
-        return qs
+    q_networks = None
+
+    def setup(self):
+        batch_qs = nn.vmap(
+            SingleCritic,
+            in_axes=None,
+            out_axes=1,
+            variable_axes={"params": 1},
+            split_rngs={"params": True, "dropout": True},
+            axis_size=self.n_critics
+        )
+        self.q_networks = batch_qs(self.features_extractor, self.net_arch, self.dropout, self.activation_fn)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+    def forward(self, observations: jnp.ndarray, actions: jnp.ndarray, deterministic: bool = False):
+        return self.q_networks(observations, actions, deterministic)
+
 
 
 class SACPolicy(object):
-    """
-    Policy class (with both actor and critic) for SAC.
-
-    :param observation_space: Observation space
-    :param action_space: Action space
-    :param lr_schedule: Learning rate schedule (could be constant)
-    :param net_arch: The specification of the policy and value networks.
-    :param activation_fn: Activation function
-    :param features_extractor_class: Features extractor to use.
-    :param features_extractor_kwargs: Keyword arguments
-        to pass to the features extractor.
-    :param normalize_images: Whether to normalize images or not,
-         dividing by 255.0 (True by default)
-    :param optimizer_class: The optimizer to use,
-        ``th.optim.Adam`` by default
-    :param optimizer_kwargs: Additional keyword arguments,
-        excluding the learning rate, to pass to the optimizer
-    :param n_critics: Number of critic networks to create.
-    :param share_features_extractor: Whether to share or not the features extractor
-        between the actor and the critic (this saves computation time)
-    """
-
     def __init__(
         self,
         key,
@@ -154,14 +168,27 @@ class SACPolicy(object):
             else:
                 net_arch = [256, 256]
 
-        actor_arch, critic_arch = get_actor_critic_arch(net_arch)
         if features_extractor_kwargs is None:
             features_extractor_kwargs = {}
-        features_extractor_def = features_extractor_class(_observation_space=observation_space, **features_extractor_kwargs)
-        actor_def = Actor(features_extractor=features_extractor_def, action_space=action_space,
-                          net_arch=actor_arch, activation_fn=activation_fn)
-        critic_def = DoubleCritic(features_extractor=features_extractor_def, net_arch=critic_arch,
-                                  activation_fn=activation_fn, n_critics=n_critics)
+
+        features_extractor_def = features_extractor_class(
+            _observation_space=observation_space,
+            **features_extractor_kwargs
+        )
+
+        actor_arch, critic_arch = get_actor_critic_arch(net_arch)
+        actor_def = Actor(
+            features_extractor=features_extractor_def,
+            action_space=action_space,
+            net_arch=actor_arch,
+            activation_fn=activation_fn
+        )
+        critic_def = Critic(
+            features_extractor=features_extractor_def,
+            net_arch=critic_arch,
+            activation_fn=activation_fn,
+            n_critics=n_critics
+        )
 
         if isinstance(observation_space, gym.spaces.Dict):
             observation = observation_space.sample()
@@ -180,8 +207,11 @@ class SACPolicy(object):
             observation = np.expand_dims(observation_space.sample(), axis=0)
         action = np.expand_dims(action_space.sample(), axis=0)
 
-        critic = Model.create(critic_def, inputs=[critic_key, observation, action],
-                              tx=optax.adam(learning_rate=lr_schedule))
+        critic = Model.create(
+            critic_def,
+            inputs=[critic_key, observation, action],
+            tx=optax.adam(learning_rate=lr_schedule)
+        )
         critic_target = Model.create(critic_def, inputs=[critic_key, observation, action])
 
         self.actor = actor

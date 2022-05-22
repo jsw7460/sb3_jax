@@ -4,6 +4,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from offline_baselines_jax import metla
+from jax.config import config
 
 import d4rl
 # import d4rl
@@ -16,7 +17,6 @@ def train(cfg: DictConfig) -> None:
     if cfg.finetune:
         model = metla.METLAMSE.load(path=cfg.model_path+"-0-99", env=env)
         rewards, _ = metla.evaluate_metla(seed=cfg.seed, env=env, model=model, n_eval_episodes=10)
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@", rewards)
         model.online_finetune_setup(
             finetune=cfg.finetune_type,
             initial_rewards=rewards,

@@ -5,6 +5,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
+import tensorflow_probability
 from tensorflow_probability.substrates import jax as tfp
 
 from offline_baselines_jax.common.jax_layers import create_mlp
@@ -13,12 +14,18 @@ from .buffer import TrajectoryBuffer
 tfd = tfp.distributions
 tfb = tfp.bijectors
 
-
 Params = flax.core.FrozenDict[str, Any]
 EPS = 1e-8
 LOG_STD_MAX = 2
 LOG_STD_MIN = -10
 CLIPPING_CONST = 10.0
+
+TANH_CLIPPING_BIJECTOR = tfb.Chain(
+    [
+        tfb.Scale(scale=CLIPPING_CONST),
+        tfb.Tanh()
+    ]
+)
 
 
 class FlattenExtractor(nn.Module):
@@ -53,6 +60,72 @@ class SASPredictor(nn.Module):      # Input: s, a // Output: predicted next stat
     def forward(self, observations: jnp.ndarray, actions: jnp.ndarray, deterministic=False):
         x = jnp.concatenate((observations, actions), axis=-1)
         return self.predictor(x, deterministic=deterministic)
+
+
+class GaussianSkillPrior(nn.Module):
+    recon_dim: int
+    dropout: float
+
+    features_extractor = None
+    latent_pi = None
+    mu = None
+    log_std = None
+    def setup(self):
+        self.latent_pi = create_mlp(
+            output_dim=128,
+            net_arch=[8, 8],
+            dropout=self.dropout
+        )
+        self.mu = create_mlp(
+            output_dim=self.recon_dim,
+            net_arch=[4, 4],
+            dropout=self.dropout
+        )
+        self.log_std = create_mlp(
+            output_dim=self.recon_dim,
+            net_arch=[4, 4],
+            dropout=self.dropout
+        )
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+    def forward(self, observation: jnp.ndarray, deterministic: bool = False):
+        mean_actions, log_stds = self.get_action_dist_params(observation, deterministic=deterministic)
+        return self.actions_from_params(mean_actions, log_stds)
+
+    def get_action_dist_params(
+            self,
+            x: jnp.ndarray,
+            deterministic: bool = False
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        latent_pi = self.latent_pi(x, deterministic=deterministic)
+        mean_actions = self.mu(latent_pi, deterministic=deterministic)
+        log_stds = self.log_std(latent_pi, deterministic=deterministic)
+        log_stds = jnp.clip(log_stds, LOG_STD_MIN, LOG_STD_MAX)
+        return mean_actions, log_stds
+
+    def actions_from_params(
+        self,
+        mean_actions: jnp.ndarray,
+        log_std: jnp.ndarray,
+    ):
+        # From mean and log std, return the actions by applying the tanh nonlinear transformation.
+        base_dist = tfd.MultivariateNormalDiag(loc=mean_actions, scale_diag=jnp.exp(log_std))
+        sampling_dist = tfd.TransformedDistribution(distribution=base_dist, bijector=TANH_CLIPPING_BIJECTOR)
+        return sampling_dist, (mean_actions, log_std)
+
+    # This is for deterministic action: no sampling, just return "mean"
+    def deterministic_action(self, x: jnp.ndarray, deterministic: bool = False):
+        mean_actions, *_ = self.get_action_dist_params(x, deterministic=deterministic)
+        return mean_actions
+
+    # Sample an action
+    def predict(self, observation: jnp.ndarray, deterministic: bool = False):
+        skill_dist, _ = self.forward(observation, deterministic)
+        sampling_key = self.make_rng("sampling")
+        skill = skill_dist.sample(seed=sampling_key)
+        return skill
 
 
 class VariationalAutoEncoder(nn.Module):
@@ -166,14 +239,14 @@ class WassersteinAutoEncoder(nn.Module):
 
         self.encoder = create_mlp(
             output_dim=8,          # 이건 상관이 없다.
-            net_arch=[64, 128, 256],
+            net_arch=[64, 32, 16],
             dropout=self.dropout,
             squash_output=False
         )
 
         self.decoder = create_mlp(
             output_dim=self.recon_dim,
-            net_arch=[256, 128, 64],
+            net_arch=[32, 64],
             dropout=self.dropout,
             squash_output=False
         )
@@ -181,41 +254,15 @@ class WassersteinAutoEncoder(nn.Module):
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
 
-    def forward(
-        self,
-        history: jnp.ndarray,
-        cur_state: jnp.ndarray,
-        deterministic: bool = False,
-    ) -> [jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, ...]]:
-        rng = self.make_rng("noise")
-
-        if history.ndim == 1:
-            history = history[np.newaxis, np.newaxis, ...]
-        elif history.ndim == 2:
-            history = history[np.newaxis, ...]
-
-        history = TrajectoryBuffer.timestep_marking(history)
-
-        latent = self.encode(history, cur_state, deterministic)        # Use deterministic encoder. No sampling
-        latent = (latent + jax.random.normal(rng, latent.shape) * 0.05)
-        recon = self.decode(history, latent=latent, deterministic=deterministic)
-
-        return recon, latent
-
-    def encode(self, history: np.ndarray, cur_state: jnp.ndarray, deterministic: bool):
+    def encode(self, observation: jnp.ndarray, deterministic: bool):
         """
         NOTE: Input history should be preprocessed before here, inside forward function.
         history: [batch_size, len_subtraj, obs_dim + action_dim + additional_dim]
         """
-        history = self.flatten_extractor(history)
-        encoder_input = jnp.hstack((history, cur_state))
-        latent = self.encoder(encoder_input, deterministic)
+        latent = self.encoder(observation, deterministic)
         return latent
 
-    def decode(self, history: np.ndarray, deterministic: bool, latent: np.ndarray = None) -> jnp.ndarray:
-        if latent is None:
-            history, *_ = TrajectoryBuffer.timestep_marking(history)
-            latent = self.encode(history, deterministic)
+    def decode(self, deterministic: bool, latent: np.ndarray = None) -> jnp.ndarray:
         recon = self.decoder(latent, deterministic)
         recon = CLIPPING_CONST * jnp.tanh(recon)
         return recon
@@ -258,7 +305,7 @@ class GeneralizedAutoEncoder(nn.Module):
 
         self.encoder = create_mlp(
             output_dim=self.latent_dim,
-            net_arch=[64, 32],
+            net_arch=[16, 8],
             dropout=self.dropout,
             squash_output=False
         )
@@ -267,7 +314,7 @@ class GeneralizedAutoEncoder(nn.Module):
         # This is due to the "n_nbd history + current + n_nbd future" recon.
         self.decoder = create_mlp(
             output_dim=self.recon_dim * (2 * self.n_nbd + 1),
-            net_arch=[32, 64, 128],
+            net_arch=[8, 16],
             dropout=self.dropout,
             squash_output=self.squashed_out
         )
@@ -277,26 +324,43 @@ class GeneralizedAutoEncoder(nn.Module):
 
     def forward(
         self,
+        history: jnp.ndarray,
         observations: jnp.ndarray,
+        future: jnp.ndarray,
         deterministic: bool = False
     ) -> [jnp.ndarray, jnp.ndarray, Tuple[jnp.ndarray, ...]]:
 
-        latent = self.encode(observations, deterministic)  # Use deterministic encoder. No sampling
+        if history.ndim == 1:
+            history = history[np.newaxis, np.newaxis, ...]
+            future = future[np.newaxis, np.newaxis, ...]
+        elif history.ndim == 2:
+            history = history[np.newaxis, ...]
+            future = future[np.newaxis, ...]
+
+        history = TrajectoryBuffer.timestep_marking(history, backward=1)
+        future = TrajectoryBuffer.timestep_marking(future, backward=0)
+
+        latent = self.encode(history, observations, future, deterministic)  # Use deterministic encoder. No sampling
         recon = self.decode(observations, latent=latent, deterministic=deterministic)
         return recon, latent
 
-    def encode(self, observations: jnp.ndarray, deterministic: bool = False):
-        # observations = self.flatten_extractor(observations)
-        latent = self.encoder(observations, deterministic=deterministic)
+    def encode(
+        self,
+        history: jnp.ndarray,           # [batch, len_history, dim + 1]
+        observations: jnp.ndarray,      # [batch, dim]
+        future: jnp.ndarray,            # [batch, len_future, dim + 1]
+        deterministic: bool = False
+    ):
+        history = self.flatten_extractor(history)
+        future = self.flatten_extractor(future)
+        encoder_input = jnp.concatenate((history, observations, future), axis=1)
+
+        latent = self.encoder(encoder_input, deterministic=deterministic)
         latent = CLIPPING_CONST * jnp.tanh(latent)
         return latent
 
     def decode(self, observations: jnp.ndarray, deterministic: bool = False, latent: jnp.ndarray = None) -> jnp.ndarray:
         batch_size = observations.shape[0]
-
-        if latent is None:
-            observations, *_ = TrajectoryBuffer.timestep_marking(observations)
-            latent = self.encode(observations, deterministic)
 
         recon = self.decoder(latent, deterministic)
         recon = recon.reshape(batch_size, -1, 2 * self.n_nbd + 1, self.recon_dim)

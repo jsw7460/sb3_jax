@@ -11,9 +11,8 @@ from .core import (
     _metla_offline_td3_update,
     _metla_td3_online_finetune_last_layer,
     _metla_offline_td3_flow_update,
-    _metla_td3_online_finetune_higher_actor,
     _metla_online_finetune_warmup_higher_actor,
-    _metla_online_finetune_warmup_last_layer,
+    _metla_sac_style_higher_actor_finetune,
 )
 from .metla import METLA
 from .policies_mse import TD3Policy
@@ -111,7 +110,9 @@ class METLAMSE(METLA):
         target_q_vals, pred_q_vals = [], []
 
         # AE
-        gae_losses, wae_losses, wae_mmd_losses, wae_recon_losses = [], [], [], []
+        gae_losses = []
+        skill_prior_losses = []
+        skill_prior_means, skill_prior_log_stds = [], []
 
         # SAS
         sas_losses = []
@@ -123,10 +124,14 @@ class METLAMSE(METLA):
             replay_data = self.replay_buffer.o_history_sample(
                 batch_size,
                 history_len=self.context_len,
-                st_future_len=self.future_len
+                st_future_len=self.future_len + 1       # Sometimes, we need future for the next step.
             )
+
+            future_obs = replay_data.st_future.observations[:, :self.future_len, ...]
+            future_act = replay_data.st_future.actions[:, :self.future_len, ...]
+
             self.key, key = jax.random.split(self.key, 2)
-            rng, infos, new_models = _metla_offline_td3_update(
+            rng, infos, new_models = _metla_offline_td3_flow_update(
                 rng=key,
                 gamma=self.gamma,
                 tau=self.tau,
@@ -146,8 +151,8 @@ class METLAMSE(METLA):
                 actions=replay_data.actions,
                 next_observations=replay_data.st_future.observations[:, 0, ...],
                 dones=jnp.zeros((batch_size, 1)),
-                future_observations=replay_data.st_future.observations,
-                future_actions=replay_data.st_future.actions
+                future_observations=future_obs,
+                future_actions=future_act,
             )
             self.apply_update(new_models)
             self._n_updates += 1
@@ -164,9 +169,9 @@ class METLAMSE(METLA):
 
             # AE
             gae_losses.append(infos["gae_loss"])
-            wae_losses.append(infos["wae_loss"])
-            wae_mmd_losses.append(infos["wae_mmd_loss"])
-            wae_recon_losses.append(infos["wae_recon_loss"])
+            skill_prior_losses.append(infos["skill_prior_loss"])
+            skill_prior_log_stds.append(infos["skill_log_std"])
+            skill_prior_means.append(infos["skill_mean"])
 
             # SAS
             sas_losses.append(infos["sas_loss"])
@@ -183,16 +188,15 @@ class METLAMSE(METLA):
 
             self.logger.record("train/sas_loss", np.mean(sas_losses))
             self.logger.record("train/gae_loss", np.mean(gae_losses))
-            self.logger.record("train/wae_loss", np.mean(wae_losses))
-            self.logger.record("train/wae_mmd_loss", np.mean(wae_mmd_losses))
-            self.logger.record("train/wae_recon_loss", np.mean(wae_recon_losses))
+            self.logger.record("train/skill_prior_loss", np.mean(skill_prior_losses))
+            self.logger.record("train/skill_mean", np.mean(skill_prior_means))
+            self.logger.record("train/skill_log_std", np.mean(skill_prior_log_stds))
 
     def get_finetune_loss_fn(self, finetune: str):
         if "last" in finetune:
-            self.finetune_ft = _metla_td3_online_finetune_last_layer
-            self.warmup_ft = _metla_online_finetune_warmup_last_layer
+            raise NotImplementedError()
         elif "higher" in finetune:
-            self.finetune_ft = _metla_td3_online_finetune_higher_actor
+            self.finetune_ft = _metla_sac_style_higher_actor_finetune
             self.warmup_ft = _metla_online_finetune_warmup_higher_actor
         else:
             raise NotImplementedError()
@@ -214,7 +218,7 @@ class METLAMSE(METLA):
             "critic": self.critic,
             "critic_target": self.critic_target,
             "second_ae": self.second_ae,
-            "finetune_layer": self.finetune_layer,
+            "higher_actor": self.higher_actor,
             "history_observations": replay_data.history_observations,
             "history_actions": replay_data.history_actions,
             "observations": replay_data.observations,
@@ -225,7 +229,6 @@ class METLAMSE(METLA):
             "dones": replay_data.dones,
             "target_noise": self.target_policy_noise,
             "target_noise_clip": self.target_noise_clip,
-            "higher_actor": self.finetune_layer,
             "higher_critic": self.higher_critic,
             "higher_critic_target": self.higher_critic_target,
         }

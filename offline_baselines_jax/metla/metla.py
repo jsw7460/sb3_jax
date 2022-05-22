@@ -29,7 +29,7 @@ from offline_baselines_jax.common.utils import configure_logger
 from offline_baselines_jax.common.utils import should_collect_more_steps
 from .buffer import TrajectoryBuffer, FinetuneReplayBuffer
 from .metla_eval import get_policy_input, get_policy_input_with_last_layer, _predict_mle, _predict_mse
-from .networks import SASPredictor, GeneralizedAutoEncoder, WassersteinAutoEncoder, VariationalAutoEncoder
+from .networks import SASPredictor, GeneralizedAutoEncoder, WassersteinAutoEncoder, GaussianSkillPrior
 from .policies_mle import SACPolicy
 from .policies_mse import HigherCritics
 
@@ -150,6 +150,7 @@ class METLA(OffPolicyAlgorithm):
         self.online_finetune_init = True
         self.online_finetune_step = None
         self.online_learning_starts = 20
+        self._initial_rewards = None
         self.warmup = None
 
         self._history_observations = []
@@ -165,7 +166,7 @@ class METLA(OffPolicyAlgorithm):
         self.finetune = None
         self.warmup_ft = None
         self.finetune_ft = None
-        self.finetune_layer = None     # Finetune last layr시에 Goal generator 뒤쪽에 하나 붙이게 될 MLP
+        self.higher_actor = None     # Finetune last layr시에 Goal generator 뒤쪽에 하나 붙이게 될 MLP
         self.action_predict = None
         self.higher_critic = None
         self.higher_critic_target = None
@@ -191,6 +192,8 @@ class METLA(OffPolicyAlgorithm):
         init_latent = jnp.zeros((1, self.latent_dim))
         init_history = jnp.hstack((init_observation, init_action))
         init_history = jnp.repeat(init_history, repeats=self.context_len, axis=0)
+        init_future = jnp.hstack((init_observation, init_action))
+        init_future = jnp.repeat(init_future, repeats=self.future_len, axis=0)
 
         sas_predictor_def = SASPredictor(
             state_dim=self.latent_dim,
@@ -213,28 +216,23 @@ class METLA(OffPolicyAlgorithm):
             dropout=self.dropout,
             n_nbd=5
         )
-
         param_key, dropout_key = jax.random.split(param_key)
         ae_rngs = {"params": param_key, "dropout": dropout_key}
         self.ae = Model.create(
             gae_def,
-            inputs=[ae_rngs, init_observation],
+            inputs=[ae_rngs, init_history, init_observation, init_future],
             tx=optax.radam(learning_rate=self.learning_rate)
         )
 
-        # second_ae_def = WassersteinAutoEncoder(
-        #     recon_dim=self.latent_dim,
-        #     dropout=self.dropout,
-        # )
-        second_ae_def = VariationalAutoEncoder(
-            recon_dim=self.latent_dim,
-            dropout=self.dropout
+        second_ae_def = GaussianSkillPrior(
+            recon_dim=self.latent_dim,      # Dimension of skill
+            dropout=self.dropout,
         )
         param_key, dropout_key, noise_key = jax.random.split(param_key, 3)
-        second_ae_rngs = {"params": param_key, "dropout": dropout_key, "noise": noise_key}
+        second_ae_rngs = {"params": param_key, "dropout": dropout_key}
         self.second_ae = Model.create(
             second_ae_def,
-            inputs=[second_ae_rngs, init_history, init_observation],
+            inputs=[second_ae_rngs, init_observation],
             tx=optax.radam(learning_rate=self.learning_rate)
         )
 
@@ -340,40 +338,25 @@ class METLA(OffPolicyAlgorithm):
             raise NotImplementedError()
 
         elif "last" in finetune:
-            last_layer_def = create_mlp(            # Last layer: latent dim --> latent dim
-                output_dim=self.latent_dim,
-                net_arch=[256, 256],
-                dropout=self.dropout,
-                squash_output=False
-            )
-
-            param_key, dropout_key = jax.random.split(self.key)
-            last_layer_rngs = {"params": param_key, "dropout_key": dropout_key}
-            self.finetune_layer = Model.create(
-                last_layer_def,
-                inputs=[last_layer_rngs, init_latent],
-                tx=optax.radam(learning_rate=self.learning_rate)
-            )
-            self.get_finetune_loss_fn("last_layer")
-            self.tensorboard_log += "-ft_last_layer"
+            raise NotImplementedError()
 
         elif "higher" in finetune:
-            higher_actor_def = WassersteinAutoEncoder(
+            higher_actor_def = GaussianSkillPrior(
                 recon_dim=self.latent_dim,
-                dropout=self.dropout,
+                dropout=self.dropout
             )
             param_key, dropout_key, noise_key = jax.random.split(self.key, 3)
-            higher_actor_rngs = {"params": param_key, "dropout": dropout_key, "noise": noise_key}
-            self.finetune_layer = Model.create(
+            higher_actor_rngs = {"params": param_key, "dropout": dropout_key}
+            self.higher_actor = Model.create(
                 higher_actor_def,
-                inputs=[higher_actor_rngs, init_history, init_observation],
+                inputs=[higher_actor_rngs, init_observation],
                 tx=optax.radam(learning_rate=self.learning_rate)
             )
             self.get_finetune_loss_fn("higher")
             self.tensorboard_log += "-ft_higher_actor"
 
             # Copy the parameter for initialization
-            # self.finetune_layer = self.finetune_layer.replace(params=self.second_ae.params)
+            self.higher_actor = self.higher_actor.replace(params=self.second_ae.params)
 
         else:
             raise NotImplementedError()
@@ -385,59 +368,42 @@ class METLA(OffPolicyAlgorithm):
         elif observation.ndim == 1:
             observation = observation[jnp.newaxis, ...]
 
-        if len(self._history_observations) == 0:
-            history = jnp.zeros((1, self.observation_dim + self.action_dim))
-            history = jnp.repeat(history, repeats=self.context_len, axis=0)
-            conditioning_latent, *_ = self.second_ae(
-                history,
-                observation,
-                deterministic=True,
-                rngs={"dropout_key": dropout_key, "noise": noise_key}
+        # if len(self._history_observations) == 0:
+        #     history = jnp.zeros((1, self.observation_dim + self.action_dim))
+        #     history = jnp.repeat(history, repeats=self.context_len, axis=0)
+        #     conditioning_latent, *_ = self.second_ae(
+        #         history,
+        #         observation,
+        #         deterministic=True,
+        #         rngs={"dropout_key": dropout_key, "noise": noise_key}
+        #     )
+        #     return observation, conditioning_latent, history, None
+
+        # else:
+        # history_observation = np.vstack(self._history_observations)[-self.context_len:, ...]
+        # history_action = np.vstack(self._history_actions)[-self.context_len:, ...]
+        # cur_hist_len = len(history_observation)
+        # hist_padding_obs = jnp.zeros((self.context_len - cur_hist_len, self.observation_dim))
+        # hist_padding_act = jnp.zeros((self.context_len - cur_hist_len, self.action_dim))
+        if self.higher_actor is None:
+            return get_policy_input(
+                key=self.key,
+                vae=self.second_ae,
+                observation=observation,
             )
-            return observation, conditioning_latent, history, None
 
         else:
-            history_observation = np.vstack(self._history_observations)[-self.context_len:, ...]
-            history_action = np.vstack(self._history_actions)[-self.context_len:, ...]
-            cur_hist_len = len(history_observation)
-            hist_padding_obs = jnp.zeros((self.context_len - cur_hist_len, self.observation_dim))
-            hist_padding_act = jnp.zeros((self.context_len - cur_hist_len, self.action_dim))
-            if self.finetune_layer is None:
+            if "last" in self.finetune:
+                raise NotImplementedError()
+
+            elif "higher" in self.finetune:
                 return get_policy_input(
                     key=self.key,
-                    vae=self.second_ae,
-                    hist_padding_obs=hist_padding_obs,
-                    hist_padding_act=hist_padding_act,
+                    higher_actor=self.higher_actor,
                     observation=observation,
-                    history_observation=history_observation,
-                    history_action=history_action
                 )
-
             else:
-                if "last" in self.finetune:
-                    return get_policy_input_with_last_layer(
-                        key=self.key,
-                        vae=self.second_ae,
-                        last_layer=self.finetune_layer,
-                        hist_padding_obs=hist_padding_obs,
-                        hist_padding_act=hist_padding_act,
-                        observation=observation,
-                        history_observation=history_observation,
-                        history_action=history_action
-                    )
-
-                elif "higher" in self.finetune:
-                    return get_policy_input(
-                        key=self.key,
-                        vae=self.finetune_layer,
-                        hist_padding_obs=hist_padding_obs,
-                        hist_padding_act=hist_padding_act,
-                        observation=observation,
-                        history_observation=history_observation,
-                        history_action=history_action
-                    )
-                else:
-                    raise NotImplementedError()
+                raise NotImplementedError()
 
     def metla_sample_action(self, observations: jnp.ndarray):
         self.key, sampling_key, dropout_key = jax.random.split(self.key, 3)
@@ -466,9 +432,7 @@ class METLA(OffPolicyAlgorithm):
         )
 
         if self.warmup > 0:
-            self.warmup -= 1
-            rng, infos, new_models = self.warmup_ft(**finetune_input)
-            prior_losses.append(infos["warmup_loss"])
+            raise NotImplementedError()
         else:
             rng, infos, new_models = self.finetune_ft(**finetune_input)
 
@@ -476,10 +440,12 @@ class METLA(OffPolicyAlgorithm):
             critic_losses.append(infos["critic_loss"])
             prior_losses.append(infos["prior_loss"])
 
+        # print("RuN", self.higher_actor.params["latent_pi"]["Dense_0"])
         self.apply_update(new_models)
 
         self._n_updates += gradient_steps
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        exit()
 
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))

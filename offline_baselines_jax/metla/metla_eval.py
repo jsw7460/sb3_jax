@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from offline_baselines_jax.common.policies import Model
+from .networks import GaussianSkillPrior
 
 # from offline_baselines_jax import METLA
 
@@ -52,66 +53,53 @@ class METLASampler(object):
         HISTORY_ACTION.append(action.copy())
 
     def _get_policy_input(self, observation: jnp.ndarray):
-        self.key, dropout_key, noise_key = jax.random.split(self.key, 3)
+        self.key, dropout_key, noise_key, sampling_key = jax.random.split(self.key, 4)
 
         if observation.ndim == 3:
             observation = observation.squeeze(1)
         elif observation.ndim == 1:
             observation = observation[jnp.newaxis, ...]
 
-        if len(HISTORY_OBSERVATION) == 0:
-            history = jnp.zeros((1, self.observation_dim + self.action_dim))
-            history = jnp.repeat(history, repeats=self.history_len, axis=0)
-            conditioning_latent, *_ = self.vae(
-                history,
-                observation,
-                deterministic=True,
-                rngs={"dropout_key": dropout_key, "noise": noise_key}
-            )
-            return observation, conditioning_latent, history, None
+        # if len(HISTORY_OBSERVATION) == 0:
+        #     history = jnp.zeros((1, self.observation_dim + self.action_dim))
+        #     history = jnp.repeat(history, repeats=self.history_len, axis=0)
+        #     conditioning_latent = self.vae(
+        #         observation,
+        #         deterministic=True,
+        #         rngs={"dropout_key": dropout_key, "noise": noise_key, "sampling": sampling_key},
+        #         method=GaussianSkillPrior.predict
+        #     )
+        #     return observation, conditioning_latent, history, None
 
-        else:
-            history_observation = np.vstack(HISTORY_OBSERVATION)[-self.history_len:, ...]
-            history_action = np.vstack(HISTORY_ACTION)[-self.history_len:, ...]
-            cur_hist_len = len(history_observation)
-            hist_padding_obs = jnp.zeros((self.history_len - cur_hist_len, self.observation_dim))
-            hist_padding_act = jnp.zeros((self.history_len - cur_hist_len, self.action_dim))
-            return get_policy_input(
-                key=self.key,
-                vae=self.vae,
-                hist_padding_obs=hist_padding_obs,
-                hist_padding_act=hist_padding_act,
-                observation=observation,
-                history_observation=history_observation,
-                history_action=history_action
-            )
+        # else:
+        # history_observation = np.vstack(HISTORY_OBSERVATION)[-self.history_len:, ...]
+        # history_action = np.vstack(HISTORY_ACTION)[-self.history_len:, ...]
+        # cur_hist_len = len(history_observation)
+        # hist_padding_obs = jnp.zeros((self.history_len - cur_hist_len, self.observation_dim))
+        # hist_padding_act = jnp.zeros((self.history_len - cur_hist_len, self.action_dim))
+        return get_policy_input(
+            key=self.key,
+            higher_actor=self.vae,
+            observation=observation,
+        )
 
 
 @jax.jit
 def get_policy_input(
         key: jnp.ndarray,
-        vae: Model,
-        hist_padding_obs: jnp.ndarray,
-        hist_padding_act: jnp.ndarray,
+        higher_actor: Model,
         observation: jnp.ndarray,
-        history_observation: jnp.ndarray,
-        history_action: jnp.ndarray,
 ):
-    key, dropout_key, noise_key = jax.random.split(key, 3)
+    key, dropout_key, noise_key, sampling_key = jax.random.split(key, 4)
 
-    history_obs = history_observation
-    history_act = history_action
-
-    history_obs = jnp.vstack((hist_padding_obs, history_obs))
-    history_act = jnp.vstack((hist_padding_act, history_act))
-    history = jnp.hstack((history_obs, history_act))
-    conditioning_latent, _ = vae(
-        history,
+    conditioning_latent = higher_actor(
         observation,
         deterministic=True,
-        rngs={"dropout_key": dropout_key, "noise": noise_key}
+        rngs={"dropout_key": dropout_key, "noise": noise_key, "sampling": sampling_key},
+        method=GaussianSkillPrior.predict
     )
-    return observation, conditioning_latent, history
+
+    return observation, conditioning_latent, None
 
 
 @jax.jit
@@ -233,11 +221,13 @@ def evaluate_metla(
             key, *_ = jax.random.split(key)
             observation, conditioned_latent, *_ = sampler._get_policy_input(observation)
 
+            if conditioned_latent.ndim == 1:
+                conditioned_latent = conditioned_latent[jnp.newaxis, ...]
             action = predictor(key, model.actor, observation, conditioned_latent)
 
             if action.ndim == 0:
                 action = action[jnp.newaxis, ...]
-            next_observation, rewards, dones, infos = env.step(action)
+            next_observation, rewards, dones, infos = env.step(action.squeeze())
 
             sampler.append(observation, action)
             current_rewards += rewards

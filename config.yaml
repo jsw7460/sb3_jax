@@ -15,7 +15,7 @@ n_iter: 200
 context_len: 20
 future_len: 7
 dropout: 0.1
-latent_dim: 25
+latent_dim: 5
 net_arch:
   - 256
   - 256
@@ -32,7 +32,7 @@ n_eval_episodes: 10
 
 # Filename
 filename_head: /workspace/jaxlog
-filename_tail: ${env_name}/${modeltype.name}-context${context_len}-future${future_len}-normalize${normalize}-seed${seed}-vae
+filename_tail: ${env_name}/${modeltype.name}-context${context_len}-future${future_len}-normalize${normalize}-seed${seed}
 tensorboard_log: ${filename_head}/tensorboard/${filename_tail}
 model_path: ${filename_head}/model/${filename_tail}
 

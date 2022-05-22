@@ -1,25 +1,17 @@
-from copy import deepcopy
-from stable_baselines3.common.noise import ActionNoise
-
-import time
-from offline_baselines_jax.common.buffers import ReplayBuffer
-from offline_baselines_jax.common.utils import configure_logger
-from offline_baselines_jax.sac.policies import SACPolicy
-from offline_baselines_jax.metla.buffer import TrajectoryBuffer
+import functools
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import gym
-import numpy as np
 import flax.linen as nn
-import jax.numpy as jnp
+import gym
 import jax
+import jax.numpy as jnp
+import numpy as np
 import optax
-import functools
-
-from offline_baselines_jax.common.policies import Model
-from offline_baselines_jax.common.buffers import ReplayBuffer
 from stable_baselines3.common.noise import ActionNoise
+
+from offline_baselines_jax.common.buffers import ReplayBuffer
 from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
+from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.type_aliases import (
     GymEnv,
     MaybeCallback,
@@ -64,7 +56,7 @@ def sac_actor_update(key: int, actor: Model, critic: Model, log_ent_coef: Model,
         ent_coef = jnp.exp(log_ent_coef())
 
         q_values_pi = critic(replay_data.observations, actions_pi)
-        min_qf_pi = jnp.min(q_values_pi, axis=0)
+        min_qf_pi = jnp.min(q_values_pi, axis=1)
 
         actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
         return actor_loss, {'actor_loss': actor_loss, 'entropy': -log_prob}
@@ -81,7 +73,7 @@ def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model
 
     # Compute the next Q values: min over all critics targets
     next_q_values = critic_target(replay_data.next_observations, next_actions)
-    next_q_values = jnp.min(next_q_values, axis=0)
+    next_q_values = jnp.min(next_q_values, axis=1)
 
     ent_coef = jnp.exp(log_ent_coef())
     # add entropy term
@@ -92,14 +84,14 @@ def sac_critic_update(key:Any, actor: Model, critic: Model, critic_target: Model
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
-        current_q= critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+        q_values= critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
 
         # Compute critic loss
-        critic_loss = 0
-        for q in current_q:
-            critic_loss = critic_loss + jnp.mean(jnp.square(q - target_q_values))
-        critic_loss = critic_loss / len(current_q)
-        return critic_loss, {'critic_loss': critic_loss, 'current_q': current_q.mean()}
+        n_qs = q_values.shape[1]
+
+        critic_loss = sum([jnp.mean((target_q_values - q_values[: ,i, ...].squeeze())) ** 2 for i in range(n_qs)])
+        critic_loss = critic_loss / n_qs
+        return critic_loss, {'critic_loss': critic_loss, 'current_q': q_values.mean()}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info
@@ -112,9 +104,19 @@ def target_update(critic: Model, critic_target: Model, tau: float) -> Model:
 
 @functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update'))
 def _update_jit(
-    rng: int, actor: Model, critic: Model, critic_target: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples,
-        gamma: float, target_entropy: float, tau: float, target_update_cond: bool, entropy_update: bool,
+    rng: int,
+    actor: Model,
+    critic: Model,
+    critic_target: Model,
+    log_ent_coef: Model,
+    replay_data: ReplayBufferSamples,
+    gamma: float,
+    target_entropy: float,
+    tau: float,
+    target_update_cond: bool,
+    entropy_update: bool
 ) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
+
     rng, key = jax.random.split(rng, 2)
     new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, replay_data, gamma)
     if target_update_cond:
@@ -124,6 +126,7 @@ def _update_jit(
 
     rng, key = jax.random.split(rng, 2)
     new_actor, actor_info = sac_actor_update(key, actor, new_critic, log_ent_coef, replay_data)
+
     rng, key = jax.random.split(rng, 2)
     if entropy_update:
         new_temp, ent_info = log_ent_coef_update(key, log_ent_coef, new_actor, target_entropy, replay_data)
@@ -134,62 +137,6 @@ def _update_jit(
 
 
 class SAC(OffPolicyAlgorithm):
-    """
-    Soft Actor-Critic (SAC)
-    Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor,
-    This implementation borrows code from original implementation (https://github.com/haarnoja/sac)
-    from OpenAI Spinning Up (https://github.com/openai/spinningup), from the softlearning repo
-    (https://github.com/rail-berkeley/softlearning/)
-    and from Stable Baselines (https://github.com/hill-a/stable-baselines)
-    Paper: https://arxiv.org/abs/1801.01290
-    Introduction to SAC: https://spinningup.openai.com/en/latest/algorithms/sac.html
-
-    Note: we use double q target and not value target as discussed
-    in https://github.com/hill-a/stable-baselines/issues/270
-
-    :param policy: The policy model to use (MlpPolicy, CnnPolicy, ...)
-    :param env: The environment to learn from (if registered in Gym, can be str)
-    :param learning_rate: learning rate for adam optimizer,
-        the same learning rate will be used for all networks (Q-Values, Actor and Value function)
-        it can be a function of the current progress remaining (from 1 to 0)
-    :param buffer_size: size of the replay buffer
-    :param learning_starts: how many steps of the model to collect transitions for before learning starts
-    :param batch_size: Minibatch size for each gradient update
-    :param tau: the soft update coefficient ("Polyak update", between 0 and 1)
-    :param gamma: the discount factor
-    :param train_freq: Update the model every ``train_freq`` steps. Alternatively pass a tuple of frequency and unit
-        like ``(5, "step")`` or ``(2, "episode")``.
-    :param gradient_steps: How many gradient steps to do after each rollout (see ``train_freq``)
-        Set to ``-1`` means to do as many gradient steps as steps done in the environment
-        during the rollout.
-    :param action_noise: the action noise type (None by default), this can help
-        for hard exploration problem. Cf common.noise for the different action noise type.
-    :param replay_buffer_class: Replay buffer class to use (for instance ``HerReplayBuffer``).
-        If ``None``, it will be automatically selected.
-    :param replay_buffer_kwargs: Keyword arguments to pass to the replay buffer on creation.
-    :param optimize_memory_usage: Enable a memory efficient variant of the replay buffer
-        at a cost of more complexity.
-        See https://github.com/DLR-RM/stable-baselines3/issues/37#issuecomment-637501195
-    :param ent_coef: Entropy regularization coefficient. (Equivalent to
-        inverse of reward scale in the original SAC paper.)  Controlling exploration/exploitation trade-off.
-        Set it to 'auto' to learn it automatically (and 'auto_0.1' for using 0.1 as initial value)
-    :param target_update_interval: update the target network every ``target_network_update_freq``
-        gradient steps.
-    :param target_entropy: target entropy when learning ``ent_coef`` (``ent_coef = 'auto'``)
-    :param use_sde: Whether to use generalized State Dependent Exploration (gSDE)
-        instead of action noise exploration (default: False)
-    :param sde_sample_freq: Sample a new noise matrix every n steps when using gSDE
-        Default: -1 (only sample at the beginning of the rollout)
-    :param use_sde_at_warmup: Whether to use gSDE instead of uniform sampling
-        during the warm up phase (before learning starts)
-    :param create_eval_env: Whether to create a second environment that will be
-        used for evaluating the agent periodically. (Only available when passing string for the environment)
-    :param policy_kwargs: additional arguments to be passed to the policy on creation
-    :param verbose: the verbosity level: 0 no output, 1 info, 2 debug
-    :param seed: Seed for the pseudo random generators
-    :param _init_setup_model: Whether or not to build the network at the creation of the instance
-    """
-
     def __init__(
         self,
         policy: Union[str, Type[SACPolicy]],
@@ -348,6 +295,9 @@ class SAC(OffPolicyAlgorithm):
         self.logger.record("train/critic_loss", np.mean(critic_losses))
         if len(ent_coef_losses) > 0:
             self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
+
+    def offline_train(self, gradient_steps: int, batch_size: int) -> None:
+        raise NotImplementedError()
 
     def learn(
         self,

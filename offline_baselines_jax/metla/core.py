@@ -9,6 +9,7 @@ from .core_comp import (
     update_gae,
     update_wae,
     update_sas,
+    update_skill_prior,
 
     # SAC
     update_entropy,
@@ -17,52 +18,19 @@ from .core_comp import (
     update_sac_actor,
     update_sac_actor_with_reward,
     update_wae_by_policy_grad_flow,
-    update_sac_last_layer,
 
     # TD3
     update_td3_critic,
     update_td3_actor,
     update_td3_finetune_layer,
-    update_td3_higher_actor_critic_last_layer,
     update_wae_by_td3_policy_grad_flow,
     update_td3_higher_actor,
+    update_sac_style_higher_actor_critic,
     update_td3_higher_actor_critic_higher_actor,
     update_gae_by_td3_policy_grad_flow,
 )
+from .networks import GaussianSkillPrior
 
-
-@jax.jit
-def _metla_online_finetune_warmup_last_layer(
-    rng: jnp.ndarray,
-    second_ae: Model,           # Wasserstein AE for reconstruct latent goal using the history
-    finetune_layer: Model,
-    history_observations: jnp.ndarray,
-    history_actions: jnp.ndarray,
-    observations: jnp.ndarray,
-    **kwargs
-):
-    rng, dropout_key, noise_key = jax.random.split(rng, 3)
-
-    history_input = jnp.concatenate((history_observations, history_actions), axis=2)
-    label, _ = second_ae(
-        history_input,
-        observations,
-        deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
-    )
-
-    def warmup_loss_fn(params):
-        pred = finetune_layer.apply_fn(
-            {"params": params},
-            label,
-            deterministic=False,
-            rngs={"dropout": dropout_key}
-        )
-        warmup_loss = jnp.mean((pred - label) ** 2) * 1000
-        return warmup_loss, {"warmup_loss": warmup_loss}
-
-    new_finetune_layer, finetune_layer_info = finetune_layer.apply_gradient(warmup_loss_fn)
-    return rng, finetune_layer_info, {"finetune_layer": new_finetune_layer}
 
 
 @jax.jit
@@ -99,9 +67,51 @@ def _metla_online_finetune_warmup_higher_actor(
     new_finetune_layer, finetune_layer_info = higher_actor.apply_gradient(warmup_loss_fn)
     return rng, finetune_layer_info, {"finetune_layer": new_finetune_layer}
 
+# @jax.jit
+def _metla_sac_style_higher_actor_finetune(     # Stochastic higher policy. No entropy in higher actor.
+    rng: jnp.ndarray,
+    gamma: float,
+    tau: float,
+    second_ae: Model,               # For prior loss
+    higher_actor: Model,
+    higher_critic: Model,
+    higher_critic_target: Model,
+    observations: jnp.ndarray,
+    higher_actions: jnp.ndarray,
+    next_observations: jnp.ndarray,
+    rewards: jnp.ndarray,           # NOTE: In online finetuning, we access to reward signal
+    dones: jnp.ndarray,
+    **kwargs
+):
+    new_higher_actor, new_higher_critic, higher_actor_info, higher_critic_info = update_sac_style_higher_actor_critic(
+        gamma=gamma,
+        rng=rng,
+        second_ae=second_ae,
+        higher_actor=higher_actor,
+        higher_critic=higher_critic,
+        higher_critic_target=higher_critic_target,
+        observations=observations,
+        higher_actions=higher_actions,
+        next_observations=next_observations,
+        rewards=rewards,
+        dones=dones
+    )
+
+    new_higher_critic_target = update_target(new_higher_critic, higher_critic_target, tau=tau)
+
+    new_models = {
+        "higher_actor": new_higher_actor,
+        "higher_critic": new_higher_critic,
+        "higher_critic_target": new_higher_critic_target
+    }
+    infos = {**higher_actor_info, **higher_critic_info}
+
+    rng, _ = jax.random.split(rng)
+    return rng, infos, new_models
+
 
 @jax.jit
-def _metla_td3_online_finetune_higher_actor(
+def _metla_td3_style_higher_actor_finetune(
     rng: jnp.ndarray,
     gamma: float,
     tau: float,
@@ -785,14 +795,40 @@ def _metla_offline_td3_update(
     # NOTE: AE train
     rng, key = jax.random.split(rng)
     new_ae, ae_info \
-        = update_gae(rng, ae, history_observations, observations, future_observations, n_nbd=5)
+        = update_gae(
+        rng=rng,
+        ae=ae,
+        history_observations=history_observations,
+        history_actions=history_actions,
+        observations=observations,
+        future_observations=future_observations,
+        future_actions=future_actions,
+        n_nbd=5
+    )
 
     # NOTE: SAS train: Note that SAS is latent model. That is, input state is embedded in the latent space.
     rng, dropout_key_1, dropout_key_2, dropout_key_3 = jax.random.split(rng, 4)
 
-    _, latent_observation = new_ae(observations, deterministic=False, rngs={"dropout": dropout_key_1})
-    _, latent_next_observation = new_ae(next_observations, deterministic=False, rngs={"dropout": dropout_key_2})
-    _, latent_future = new_ae(future_observations, deterministic=False, rngs={"dropout": dropout_key_3})
+    latent_observation = second_ae(
+        observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_1, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
+
+    latent_next_observation = second_ae(
+        next_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_2, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
+
+    latent_future = second_ae(
+        future_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_3, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
 
     new_sas, sas_info \
         = update_sas(rng, sas_predictor, latent_observation, actions, latent_next_observation)
@@ -814,28 +850,24 @@ def _metla_offline_td3_update(
 
     # NOTE: Second AE train
     rng, key, dropout_key, noise_key = jax.random.split(rng, 4)
-    new_second_ae, second_ae_info = update_wae(
-        rng=key,
-        ae=second_ae,
-        history_observations=history_observations,
-        history_actions=history_actions,
+    new_second_ae, second_ae_info = update_skill_prior(
+        rng=rng,
+        skill_prior=second_ae,
         observations=observations,
         recon_target=latent_goal_observation
     )
 
-    current_conditioned_latent = second_ae_info["wae_recon"]
-    history = jnp.concatenate((history_observations, history_actions), axis=2)[:, 1:, ...]
-    current = jnp.hstack((observations, actions))[:, jnp.newaxis, :]
-    history_for_next_timestep = jnp.concatenate((history, current), axis=1)
-    next_conditioned_latent, _ = new_second_ae(
-        history_for_next_timestep,
+    current_conditioned_latent = latent_observation
+
+    rng, dropout_key, sampling_key = jax.random.split(rng, 3)
+    next_conditioned_latent = new_second_ae(
         next_observations,
         deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
+        rngs={"dropout": dropout_key, "sampling": sampling_key},
+        method=GaussianSkillPrior.predict
     )
 
     rng, key = jax.random.split(rng)
-
     new_critic, critic_info = update_td3_critic(
         rng=rng,
         gamma=gamma,
@@ -911,14 +943,40 @@ def _metla_offline_td3_flow_update(
     # NOTE: AE train
     rng, key = jax.random.split(rng)
     new_ae, ae_info \
-        = update_gae(rng, ae, history_observations, observations, future_observations, n_nbd=5)
+        = update_gae(
+        rng=rng,
+        ae=ae,
+        history_observations=history_observations,
+        history_actions=history_actions,
+        observations=observations,
+        future_observations=future_observations,
+        future_actions=future_actions,
+        n_nbd=5
+    )
 
     # NOTE: SAS train: Note that SAS is latent model. That is, input state is embedded in the latent space.
     rng, dropout_key_1, dropout_key_2, dropout_key_3 = jax.random.split(rng, 4)
 
-    _, latent_observation = new_ae(observations, deterministic=False, rngs={"dropout": dropout_key_1})
-    _, latent_next_observation = new_ae(next_observations, deterministic=False, rngs={"dropout": dropout_key_2})
-    _, latent_future = new_ae(future_observations, deterministic=False, rngs={"dropout": dropout_key_3})
+    latent_observation = second_ae(
+        observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_1, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
+
+    latent_next_observation = second_ae(
+        next_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_2, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
+
+    latent_future = second_ae(
+        future_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key_3, "sampling": key},
+        method=GaussianSkillPrior.predict
+    )
 
     new_sas, sas_info \
         = update_sas(rng, sas_predictor, latent_observation, actions, latent_next_observation)
@@ -940,13 +998,18 @@ def _metla_offline_td3_flow_update(
 
     # NOTE: Second AE train
     rng, key, dropout_key, noise_key = jax.random.split(rng, 4)
-    new_second_ae, second_ae_info = update_wae(
-        rng=key,
-        ae=second_ae,
-        history_observations=history_observations,
-        history_actions=history_actions,
+    new_second_ae, second_ae_info = update_skill_prior(
+        rng=rng,
+        skill_prior=second_ae,
         observations=observations,
         recon_target=latent_goal_observation
+    )
+
+    next_conditioned_latent = new_second_ae(
+        next_observations,
+        deterministic=False,
+        rngs={"dropout": dropout_key, "sampling": key},
+        method=GaussianSkillPrior.predict
     )
 
     rng, key = jax.random.split(rng)
@@ -957,11 +1020,16 @@ def _metla_offline_td3_flow_update(
         actor_target=actor_target,
         critic=critic,
         critic_target=critic_target,
+        history_observations=history_observations,
+        history_actions=history_actions,
         observations=observations,
+        future_observations=future_observations,
+        future_actions=future_actions,
         actions=actions,
         next_observations=next_observations,
         latent_next_observation=latent_next_observation,
         latent_goal_observation=latent_goal_observation,
+        next_conditioned_latent=next_conditioned_latent,
         dones=dones,
         target_noise=target_noise,
         target_noise_clip=target_noise_clip
@@ -969,28 +1037,18 @@ def _metla_offline_td3_flow_update(
     ae_info.update(new_ae_info)
 
     rng, key = jax.random.split(rng)
-
-
-    history = jnp.concatenate((history_observations, history_actions), axis=2)
-    history_for_next_timesteup = history[:, 1:, ...]
-    current = jnp.hstack((observations, actions))[:, jnp.newaxis, :]
-    history_for_next_timestep = jnp.concatenate((history_for_next_timesteup, current), axis=1)
-
-    current_conditioned_latent, _ = new_second_ae(
-        history,
+    current_conditioned_latent = new_second_ae(
         observations,
         deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
+        rngs={"dropout": dropout_key, "sampling": key},
+        method=GaussianSkillPrior.predict
     )
-    next_conditioned_latent, _ = new_second_ae(
-        history_for_next_timestep,
+    next_conditioned_latent = new_second_ae(
         next_observations,
         deterministic=False,
-        rngs={"dropout": dropout_key, "noise": noise_key}
+        rngs={"dropout": dropout_key, "sampling": key},
+        method=GaussianSkillPrior.predict
     )
-
-    # Distance to goal state is the rewards.
-    rewards = - jnp.sum((latent_next_observation - latent_goal_observation) ** 2, axis=-1)
 
     rng, key = jax.random.split(rng)
     new_critic, critic_info = update_td3_critic(
@@ -999,10 +1057,10 @@ def _metla_offline_td3_flow_update(
         actor_target=actor_target,
         critic=critic,
         critic_target=critic_target,
+        sas_predictor=new_sas,
         observations=observations,
         actions=actions,
         next_observations=next_observations,
-        rewards=rewards,
         dones=dones,
         current_conditioned_latent=current_conditioned_latent,
         next_conditioned_latent=next_conditioned_latent,
