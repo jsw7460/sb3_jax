@@ -68,3 +68,5 @@ backup/
 runs/
 .hydra/*
 *.yaml
+d4rl_maze/
+outputs/
