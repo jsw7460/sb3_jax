@@ -1,7 +1,5 @@
-import functools
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import time
 import flax.linen as nn
 import gym
 import jax
@@ -17,11 +15,11 @@ from offline_baselines_jax.common.type_aliases import (
     GymEnv,
     MaybeCallback,
     Schedule,
-    InfoDict,
-    ReplayBufferSamples,
     Params
 )
-from offline_baselines_jax.sac.policies import SACPolicy, MultiInputPolicy, CnnPolicy
+from offline_baselines_jax.sac.policies import SACPolicy, MultiInputPolicy
+from .core import sac_update_with_bc
+from .buffer import SensorBasedExpertBuffer
 
 
 class LogEntropyCoef(nn.Module):
@@ -32,125 +30,7 @@ class LogEntropyCoef(nn.Module):
         return log_temp
 
 
-def log_ent_coef_update(
-    key:Any,
-    log_ent_coef: Model,
-    actor: Model,
-    target_entropy: float,
-    replay_data:ReplayBufferSamples
-) -> Tuple[Model, InfoDict]:
-    def temperature_loss_fn(ent_params: Params):
-        dist = actor(replay_data.observations)
-        actions_pi = dist.sample(seed=key)
-        log_prob = dist.log_prob(actions_pi)
-
-        ent_coef = log_ent_coef.apply_fn({'params': ent_params})
-        ent_coef_loss = -(ent_coef * (target_entropy + log_prob)).mean()
-
-        return ent_coef_loss, {'ent_coef': ent_coef, 'ent_coef_loss': ent_coef_loss}
-
-    new_ent_coef, info = log_ent_coef.apply_gradient(temperature_loss_fn)
-    return new_ent_coef, info
-
-
-def sac_actor_update(key: int, actor: Model, critic: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples):
-    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        dist = actor.apply_fn({'params': actor_params}, replay_data.observations)
-        actions_pi = dist.sample(seed=key)
-        log_prob = dist.log_prob(actions_pi)
-
-        ent_coef = jnp.exp(log_ent_coef())
-
-        q_values_pi = critic(replay_data.observations, actions_pi)
-        min_qf_pi = jnp.min(q_values_pi, axis=1)
-
-        actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
-        return actor_loss, {'actor_loss': actor_loss, 'entropy': -log_prob}
-
-    new_actor, info = actor.apply_gradient(actor_loss_fn)
-    return new_actor, info
-
-
-def sac_critic_update(
-    key:Any,
-    actor: Model,
-    critic: Model,
-    critic_target: Model,
-    log_ent_coef: Model,
-    replay_data: ReplayBufferSamples,
-    gamma:float
-):
-    dist = actor(replay_data.next_observations)
-    next_actions = dist.sample(seed=key)
-    next_log_prob = dist.log_prob(next_actions)
-
-    # Compute the next Q values: min over all critics targets
-    next_q_values = critic_target(replay_data.next_observations, next_actions)
-    next_q_values = jnp.min(next_q_values, axis=1)
-
-    ent_coef = jnp.exp(log_ent_coef())
-    # add entropy term
-    next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
-    # td error + entropy term
-    target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
-
-    def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        # Get current Q-values estimates for each critic network
-        # using action from the replay buffer
-        q_values= critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
-
-        # Compute critic loss
-        n_qs = q_values.shape[1]
-
-        critic_loss = sum([jnp.mean((target_q_values - q_values[:, i, ...]) ** 2) for i in range(n_qs)])
-        critic_loss = critic_loss / n_qs
-
-        return critic_loss, {'critic_loss': critic_loss, 'current_q': q_values.mean()}
-
-    new_critic, info = critic.apply_gradient(critic_loss_fn)
-    return new_critic, info
-
-
-def target_update(critic: Model, critic_target: Model, tau: float) -> Model:
-    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), critic.params, critic_target.params)
-    return critic_target.replace(params=new_target_params)
-
-
-@functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update'))
-def _update_jit(
-    rng: int,
-    actor: Model,
-    critic: Model,
-    critic_target: Model,
-    log_ent_coef: Model,
-    replay_data: ReplayBufferSamples,
-    gamma: float,
-    target_entropy: float,
-    tau: float,
-    target_update_cond: bool,
-    entropy_update: bool
-) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
-
-    rng, key = jax.random.split(rng, 2)
-    new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, replay_data, gamma)
-    if target_update_cond:
-        new_critic_target = target_update(new_critic, critic_target, tau)
-    else:
-        new_critic_target = critic_target
-
-    rng, key = jax.random.split(rng, 2)
-    new_actor, actor_info = sac_actor_update(key, actor, new_critic, log_ent_coef, replay_data)
-
-    rng, key = jax.random.split(rng, 2)
-    if entropy_update:
-        new_temp, ent_info = log_ent_coef_update(key, log_ent_coef, new_actor, target_entropy, replay_data)
-    else:
-        new_temp, ent_info = log_ent_coef, {'ent_coef': jnp.exp(log_ent_coef()), 'ent_coef_loss': 0}
-
-    return rng, new_actor, new_critic, new_critic_target, new_temp, {**critic_info, **actor_info, **ent_info}
-
-
-class SAC(OffPolicyAlgorithm):
+class SACBC(OffPolicyAlgorithm):
     def __init__(
         self,
         env: Union[GymEnv, str],
@@ -177,9 +57,12 @@ class SAC(OffPolicyAlgorithm):
         seed: int = 0,
         _init_setup_model: bool = True,
         without_exploration: bool = False,
+
+        sac_coef: float = 1.0,
+        bc_coef: float = 1.0
     ):
 
-        super(SAC, self).__init__(
+        super(SACBC, self).__init__(
             policy,
             env,
             learning_rate,
@@ -212,6 +95,10 @@ class SAC(OffPolicyAlgorithm):
         self.target_update_interval = target_update_interval
         self.entropy_update = True
 
+        self.expert_buffer = None       # type: SensorBasedExpertBuffer
+        self.sac_coef = sac_coef
+        self.bc_coef = bc_coef
+
         if _init_setup_model:
             self._setup_model()
 
@@ -219,7 +106,6 @@ class SAC(OffPolicyAlgorithm):
         # Inverse of the reward scale
         self.ent_coef = ent_coef
         self.target_update_interval = target_update_interval
-        self.entropy_update = True
         self.latent_dim = None
 
         self.observation_dim = -1
@@ -234,8 +120,12 @@ class SAC(OffPolicyAlgorithm):
         self._history_observations = []
         self._history_actions = []
 
+    def set_expert_buffer(self, path: str, n_frames: int):
+        self.expert_buffer = SensorBasedExpertBuffer(path, n_frames)
+        self.expert_buffer.relabel_action_by_obs_difference()
+
     def _setup_model(self) -> None:
-        super(SAC, self)._setup_model()
+        super(SACBC, self)._setup_model()
         self._create_aliases()
         # Target entropy is used when learning the entropy coefficient
         if self.target_entropy == "auto":
@@ -280,28 +170,54 @@ class SAC(OffPolicyAlgorithm):
         ent_coef_losses, ent_coefs = [], []
         actor_losses, critic_losses = [], []
 
+        sac_losses, bc_losses = [], []
         for gradient_step in range(gradient_steps):
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size=batch_size)
+            expert_observations, expert_actions, _ = self.expert_buffer.sample(
+                batch_size=batch_size,
+                relabled_action=False
+            )
 
-            # replay_data = self.replay_buffer.history_reward_sample(batch_size=batch_size, history_len=7, st_future_len=20)
             self.key, key = jax.random.split(self.key, 2)
             target_update_cond = gradient_step % self.target_update_interval == 0
 
-            self.key, new_actor, new_critic, new_critic_target, new_log_ent_coef, info \
-                = _update_jit(key, self.actor, self.critic, self.critic_target, self.log_ent_coef, replay_data,
-                              self.gamma, self.target_entropy, self.tau, target_update_cond, self.entropy_update)
+            bc_coef = 0.0001 if self.num_timesteps < 10000 else self.bc_coef
+
+            self.key, new_models, info = sac_update_with_bc(
+                rng=self.key,
+                actor=self.actor,
+                critic=self.critic,
+                critic_target=self.critic_target,
+                log_ent_coef=self.log_ent_coef,
+
+                observations=replay_data.observations,
+                actions=replay_data.actions,
+                rewards=replay_data.rewards,
+                next_observations=replay_data.next_observations,
+                dones=replay_data.dones,
+
+                expert_observations=expert_observations,
+                expert_actions=expert_actions,
+
+                sac_coef = self.sac_coef,
+                bc_coef = bc_coef,
+
+                gamma=self.gamma,
+                target_entropy=self.target_entropy,
+                tau=self.tau,
+                target_update_cond=target_update_cond,
+                entropy_update=self.entropy_update
+            )
+
             ent_coef_losses.append(info['ent_coef_loss'])
             ent_coefs.append(info['ent_coef'])
             critic_losses.append(info['critic_loss'])
             actor_losses.append(info['actor_loss'])
+            sac_losses.append(info["sac_loss"])
+            bc_losses.append(info["bc_loss"])
 
-            self.policy.actor = new_actor
-            self.policy.critic = new_critic
-            self.policy.critic_target = new_critic_target
-            self.log_ent_coef = new_log_ent_coef
-
-            self._create_aliases()
+            self.apply_new_models(new_models)
 
         self._n_updates += gradient_steps
         if self.num_timesteps % 500 == 0:
@@ -309,6 +225,11 @@ class SAC(OffPolicyAlgorithm):
             self.logger.record("train/ent_coef", np.mean(ent_coefs))
             self.logger.record("train/actor_loss", np.mean(actor_losses))
             self.logger.record("train/critic_loss", np.mean(critic_losses))
+            self.logger.record("train/sac_loss", np.mean(sac_losses))
+            self.logger.record("train/bc_loss", np.mean(bc_losses))
+
+            self.logger.record("config/sac_coef", self.sac_coef, exclude="tensorboard")
+            self.logger.record("config/bc_coef", bc_coef, exclude="tensorboard")
             if len(ent_coef_losses) > 0:
                 self.logger.record("train/ent_coef_loss", np.mean(ent_coef_losses))
 
@@ -323,12 +244,12 @@ class SAC(OffPolicyAlgorithm):
         eval_env: Optional[GymEnv] = None,
         eval_freq: int = -1,
         n_eval_episodes: int = 5,
-        tb_log_name: str = "SAC",
+        tb_log_name: str = "SACBC",
         eval_log_path: Optional[str] = None,
         reset_num_timesteps: bool = True,
     ) -> OffPolicyAlgorithm:
 
-        return super(SAC, self).learn(
+        return super(SACBC, self).learn(
             total_timesteps=total_timesteps,
             callback=callback,
             log_interval=log_interval,
@@ -341,7 +262,7 @@ class SAC(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super(SAC, self)._excluded_save_params() + ["actor", "critic", "critic_target", "log_ent_coef"]
+        return super(SACBC, self)._excluded_save_params() + ["actor", "critic", "critic_target", "log_ent_coef"]
 
     def _get_jax_save_params(self) -> Dict[str, Params]:
         params_dict = {}
