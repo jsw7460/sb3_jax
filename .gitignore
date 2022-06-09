@@ -46,6 +46,23 @@ src
 *.lprof
 *.prof
 
-MUJOCO_LOG.TXT
+2dnavi.py
+2dnavioff.py
+foo*
+online.py
+server.py
+client.py
+gail/
+goal*
+rndtest.py
+tests/
+_navigation_2d/
+envs/
+multiworld/
+backup/
+runs/
+.hydra/*
+*.yaml
+
 d4rl_maze/
 outputs/
