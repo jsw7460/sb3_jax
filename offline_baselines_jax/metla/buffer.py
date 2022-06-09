@@ -1,3 +1,4 @@
+import pickle
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
@@ -91,7 +92,6 @@ class TrajectoryBuffer(BaseBuffer):
         buffer_size: int = -1,
     ):
         if data_path is not None:
-            import pickle
             with open(data_path + ".pkl", "rb") as f:
                 expert_dataset = pickle.load(f)
 

@@ -187,7 +187,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             )
 
         self.key, key = jax.random.split(self.key, 2)
-
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             key=key,
             observation_space=self.observation_space,
@@ -301,8 +300,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             reset_num_timesteps,
             tb_log_name,
         )
-
         callback.on_training_start(locals(), globals())
+
         while self.num_timesteps < total_timesteps:
             if not self.without_exploration:
                 rollout = self.collect_rollouts(
@@ -341,6 +340,21 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_training_end()
         return self
 
+    def apply_new_models(self, new_models: Dict):
+        for k, v in new_models.items():
+            assert hasattr(self, k)
+            if k == "actor":
+                self.actor = v
+                self.policy.actor = v
+            elif k == "critic":
+                self.critic = v
+                self.policy.critic = v
+            elif k == "critic_target":
+                self.critic_target = v
+                self.policy.critic_target = v
+            else:
+                setattr(self, k, v)
+
     def train(self, gradient_steps: int, batch_size: int) -> None:
         """
         Sample the replay buffer and do the updates
@@ -350,6 +364,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
     def offline_train(self, gradient_steps: int, batch_size: int) -> None:
         raise NotImplementedError()
+
+    def get_predict_input(self, observations: np.ndarray):
+        return observations
 
     def _sample_action(
         self,
@@ -380,7 +397,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             # we assume that the policy uses tanh to scale the action
             # We use non-deterministic action in the case of SAC, for TD3, it does not matter
             unscaled_action, _ = self.policy.predict(self._last_obs, deterministic=False)
-
         # Rescale the action from [low, high] to [-1, 1]
         if isinstance(self.action_space, gym.spaces.Box):
             scaled_action = self.policy.scale_action(unscaled_action)
@@ -392,6 +408,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             # We store the scaled action in the buffer
             buffer_action = scaled_action
             action = self.policy.unscale_action(scaled_action)
+
         else:
             # Discrete case, no need to normalize or clip
             buffer_action = unscaled_action
@@ -433,7 +450,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         reward: np.ndarray,
         dones: np.ndarray,
         infos: List[Dict[str, Any]],
-        metla_normalizing: float = 1.0
     ) -> None:
         """
         Store transition in the replay buffer.
@@ -478,8 +494,8 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                         next_obs[i] = self._vec_normalize_env.unnormalize_obs(next_obs[i, :])
 
         replay_buffer.add(
-            self._last_original_obs / metla_normalizing,
-            next_obs / metla_normalizing,
+            self._last_original_obs,
+            next_obs,
             buffer_action,
             reward_,
             dones,

@@ -4,33 +4,18 @@ import numpy as np
 import collections
 import pickle
 
-import d4rl
+import d4rl_maze
 
 if __name__ == "__main__":
-	# with open("halfcheetah-expert-v2.pkl", "rb") as f:
-	# 	z = pickle.load(f)
-	#
-	# for i, item in enumerate(z):
-	# 	print(i, type(item))
-	# exit()
 	datasets = []
-
+	print(d4rl_maze)
+	exit()
 	for env_name in ["halfcheetah"]:
-		for dataset_type in ["medium"]:
+		for dataset_type in ["expert"]:
 		# for dataset_type in ["human", "cloned", "expert"]:
 			name = f'{env_name}-{dataset_type}-v2'
 			env = gym.make(name)
-			# dataset = env.get_dataset()
-			dataset = d4rl.qlearning_dataset(env)
-			print(dataset.keys())
-			print(dataset["observations"].shape)			# [size, dim]
-			print(dataset["next_observations"].shape)		# [size, dim]
-			print(dataset["actions"].shape)					# [size, dim]
-			print(dataset["rewards"].shape)					# [size, ]
-			print(dataset["terminals"].shape)				# [size, ]
-			exit()
-			# print("data", dataset)
-			# exit()
+			dataset = d4rl_maze.qlearning_dataset(env)
 			N = dataset['rewards'].shape[0]
 			data_ = collections.defaultdict(list)
 
@@ -61,7 +46,8 @@ if __name__ == "__main__":
 			num_samples = np.sum([p['rewards'].shape[0] for p in paths])
 			print(f'Number of samples collected: {num_samples}')
 			print(
-				f'Trajectory returns: mean = {np.mean(returns)}, std = {np.std(returns)}, max = {np.max(returns)}, min = {np.min(returns)}')
+				f'Trajectory returns: mean = {np.mean(returns)}, std = {np.std(returns)}, max = {np.max(returns)}, min = {np.min(returns)}'
+			)
 
 			with open(f'{name}.pkl', 'wb') as f:
 				pickle.dump(paths, f)

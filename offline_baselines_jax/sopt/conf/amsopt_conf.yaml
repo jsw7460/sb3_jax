@@ -1,0 +1,102 @@
+memo: xxx
+
+seed: 1
+img_shape: 128
+
+# Maze Env
+#env_name: maze2d-randMaze0S${rand_maze_size}-ac-v0
+env_name: halfcheetah-medium-v2
+rand_maze_size: 12
+agent_centric: False
+img_based: False
+reward_type: sparse
+coverage_frac: 0.0
+n_frames: 5
+
+# Filename
+filename_head: /workspace/soptlog
+filename_tail: ${env_name}/seed${seed}
+
+tensorboard_log: ${filename_head}/tensorboard/${filename_tail}
+model_path: ${filename_head}/model/${filename_tail}
+bc_path: ${filename_head}/model/${env_name}/seed1-bc500000
+expert_buffer_path: /workspace/expertdata/dttrajectory/halfcheetah-expert-v2
+#expert_buffer_path: /workspace/expertdata/dttrajectory/Maze2d_sensor_0
+
+# Hyperparams
+model_type: SENSOR
+dropout: 0.0
+learning_rate: 1e-4
+intrinsic_rew_coef: 0.0
+
+
+# Models
+sensor_based_model:
+  _target_: offline_baselines_jax.sopt.SensorBasedActionMatcherSoptSAC
+  seed: ${seed}
+  verbose: 1
+  batch_size: 256
+  tensorboard_log: ${tensorboard_log}-sopt
+  buffer_size: 100_000
+  train_freq: 1
+  without_exploration: False
+  learning_starts: 5000
+  dropout: ${dropout}
+  intrinsic_rew_coef: ${intrinsic_rew_coef}
+  ent_coef: 1.0
+
+  # Update_ft_str: One of
+  # 1. sensor_based_single_state_amsopt_sac_update
+  # 2. sensor_based_double_state_amsopt_sac_update
+  # 3. sensor_based_inverse_dynamics_without_disc_amsopt_sac_update
+  update_ft_str: sensor_based_inverse_dynamics_without_disc_amsopt_sac_update
+  policy_kwargs:
+    dropout: ${dropout}
+
+
+sac_model:
+  _target_: offline_baselines_jax.SAC
+  seed: ${seed}
+  verbose: 1
+  batch_size: 256
+  tensorboard_log: ${tensorboard_log}-sac
+  buffer_size: 100_000
+  train_freq: 1
+  without_exploration: False
+  learning_starts: 5000
+
+
+bc_coef: 1.0
+sac_coef: 1.0
+sacbc_model:
+  _target_: offline_baselines_jax.sopt.SACBC
+  seed: ${seed}
+  verbose: 1
+  batch_size: 256
+  tensorboard_log: ${tensorboard_log}-sacbc
+  buffer_size: 100_000
+  train_freq: 1
+  without_exploration: False
+  learning_starts: 5000
+  ent_coef: 1.0
+
+  bc_coef: ${bc_coef}
+  sac_coef: ${sac_coef}
+
+
+# Learning Config
+sopt_learning_kwargs:
+  total_timesteps: 1_000_000
+  log_interval: 1
+  tb_log_name: SoptSAC
+
+
+sac_learning_kwargs:
+  total_timesteps: 10_000
+  log_interval: 1
+  tb_log_name: SAC
+
+sacbc_learning_kwargs:
+  total_timesteps: 10_000
+  log_interval: 1
+  tb_log_name: SACBC_sac${sac_coef}_bc${bc_coef}
