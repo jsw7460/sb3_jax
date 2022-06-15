@@ -15,82 +15,9 @@ from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
 from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
 from offline_baselines_jax.td3.policies import TD3Policy
 
-def td3_critic_update(key:Any, critic: Model, critic_target: Model, actor_target: Model,
-                      replay_data:ReplayBufferSamples, gamma:float, target_policy_noise: float, target_noise_clip: float):
-
-    # Select action according to policy and add clipped noise
-    noise = jax.random.normal(key) * target_policy_noise
-    noise = jnp.clip(noise, -target_noise_clip, target_noise_clip)
-    next_actions = jnp.clip((actor_target(replay_data.next_observations) + noise), -1, 1)
-
-    # Compute the next Q-values: min over all critics targets
-    next_q_values = critic_target(replay_data.next_observations, next_actions)
-    next_q_values = jnp.min(next_q_values, axis=0)
-    target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
-
-    def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        # Get current Q-values estimates for each critic network
-        current_q = critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
-
-        critic_loss = 0
-        # Compute critic loss
-        for q in current_q:
-            critic_loss = critic_loss + jnp.mean(jnp.square(q - target_q_values))
-        critic_loss = critic_loss / len(current_q)
-        return critic_loss, {'critic_loss': critic_loss, 'current_q': current_q.mean()}
-
-    new_critic, info = critic.apply_gradient(critic_loss_fn)
-    return new_critic, info
+from .core import update_td3
 
 
-def td3_actor_update(actor: Model, critic: Model, replay_data:ReplayBufferSamples, alpha: float, without_exploration: bool):
-    if without_exploration:
-        actions_pi = actor(replay_data.observations)
-        q1 = critic(replay_data.observations, actions_pi)[0]
-        coef_lambda = alpha / (jnp.mean(jnp.abs(q1)))
-    else:
-        coef_lambda = 1
-
-    def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        # Compute actor loss
-        actions_pi = actor.apply_fn({'params': actor_params}, replay_data.observations)
-        q_value = critic(replay_data.observations, actions_pi)[0].mean()
-
-        actor_loss = - q_value
-        if without_exploration:
-            bc_loss = jnp.mean(jnp.square(actions_pi - replay_data.actions))
-            actor_loss = coef_lambda * actor_loss + bc_loss
-
-        return actor_loss, {'actor_loss': actor_loss, 'q_value': q_value, 'coef_lambda': coef_lambda}
-
-    new_actor, info = actor.apply_gradient(actor_loss_fn)
-    return new_actor, info
-
-
-def target_update(model: Model, target: Model, tau: float) -> Model:
-    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), model.params, target.params)
-    return target.replace(params=new_target_params)
-
-
-@functools.partial(jax.jit, static_argnames=('gamma', 'tau', 'target_policy_noise', 'target_noise_clip', 'alpha',
-                                             'without_exploration', 'actor_update_cond'))
-def _update_jit(rng: int, actor: Model, critic: Model, actor_target: Model, critic_target: Model, replay_data: ReplayBufferSamples,
-                actor_update_cond: bool, tau: float, target_policy_noise: float, target_noise_clip: float, gamma: float, alpha: float, without_exploration: bool,
-                ) -> Tuple[int, Model, Model, Model, Model, InfoDict]:
-
-    rng, key = jax.random.split(rng, 2)
-    new_critic, critic_info = td3_critic_update(key, critic, critic_target, actor_target, replay_data, gamma, target_policy_noise, target_noise_clip)
-
-    if actor_update_cond:
-        new_actor, actor_info = td3_actor_update(actor, new_critic, replay_data, alpha, without_exploration)
-        new_actor_target = target_update(new_actor, actor_target, tau)
-        new_critic_target = target_update(new_critic, critic_target, tau)
-    else:
-        new_actor, actor_info = actor, {'actor_loss': 0, 'q_value': 0, 'coef_lambda': 1}
-        new_actor_target = actor_target
-        new_critic_target = critic_target
-
-    return rng, new_actor, new_critic, new_actor_target, new_critic_target, {**critic_info, **actor_info}
 
 class TD3(OffPolicyAlgorithm):
     """
@@ -141,8 +68,8 @@ class TD3(OffPolicyAlgorithm):
 
     def __init__(
         self,
-        policy: Union[str, Type[TD3Policy]],
         env: Union[GymEnv, str],
+        policy: Union[str, Type[TD3Policy]] = TD3Policy,
         learning_rate: Union[float, Schedule] = 1e-4,
         buffer_size: int = 1_000_000,  # 1e6
         learning_starts: int = 100,
@@ -220,20 +147,35 @@ class TD3(OffPolicyAlgorithm):
             self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
-            self.key, key = jax.random.split(self.key, 2)
+            self.rng, key = jax.random.split(self.rng, 2)
 
             actor_update_cond = self._n_updates % self.policy_delay == 0
 
-            self.key, new_actor, new_critic, new_actor_target, new_critic_target, info = \
-                _update_jit(key, self.actor, self.critic, self.actor_target, self.critic_target, replay_data,
-                            actor_update_cond, self.tau, self.target_policy_noise, self.target_noise_clip, self.gamma, self.alpha, self.without_exploration)
+            self.rng, new_models, info = \
+                update_td3(
+                    key,
+                    actor=self.actor,
+                    actor_target=self.actor_target,
+                    critic=self.critic,
+                    critic_target=self.critic_target,
 
-            self.policy.actor = new_actor
-            self.policy.critic = new_critic
-            self.policy.actor_target = new_actor_target
-            self.policy.critic_target = new_critic_target
+                    observations=replay_data.observations,
+                    actions=replay_data.actions,
+                    next_observations=replay_data.next_observations,
+                    rewards=replay_data.rewards,
+                    dones=replay_data.dones,
 
-            self._create_aliases()
+                    actor_update_cond=actor_update_cond,
+                    tau=self.tau,
+                    target_policy_noise=self.target_policy_noise,
+                    target_noise_clip=self.target_noise_clip,
+                    gamma=self.gamma,
+                    alpha=self.alpha,
+                    without_exploration=self.without_exploration
+                )
+
+            self.apply_new_models(new_models)
+
             actor_losses.append(info['actor_loss'])
             critic_losses.append(info['critic_loss'])
             coef_lambda.append(info['coef_lambda'])

@@ -127,7 +127,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         self.replay_buffer_kwargs = replay_buffer_kwargs
         self._episode_storage = None
 
-        self.key = None
+        self.rng = None
         # Remove terminations (dones) that are due to time limit
         # see https://github.com/hill-a/stable-baselines/issues/863
         self.remove_time_limit_termination = remove_time_limit_termination
@@ -165,7 +165,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             self.train_freq = TrainFreq(*train_freq)
 
     def _setup_model(self) -> None:
-        self.key = jax.random.PRNGKey(self.seed)
+        self.rng = jax.random.PRNGKey(self.seed)
         self._setup_lr_schedule()
         self.set_random_seed(self.seed)
 
@@ -186,7 +186,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 **self.replay_buffer_kwargs,
             )
 
-        self.key, key = jax.random.split(self.key, 2)
+        self.rng, key = jax.random.split(self.rng, 2)
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             key=key,
             observation_space=self.observation_space,

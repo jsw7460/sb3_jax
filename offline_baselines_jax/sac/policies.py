@@ -1,19 +1,14 @@
-import warnings
+import functools
 from typing import Any, Dict, List, Optional, Tuple, Type, Union, Callable
 
+import flax.linen as nn
 import gym
 import jax
-import functools
-import optax
-
-import flax.linen as nn
 import jax.numpy as jnp
 import numpy as np
+import optax
 from tensorflow_probability.substrates import jax as tfp
 
-
-from offline_baselines_jax.common.policies import Model
-from offline_baselines_jax.common.preprocessing import get_action_dim, preprocess_obs
 from offline_baselines_jax.common.jax_layers import (
     BaseFeaturesExtractor,
     CombinedExtractor,
@@ -22,6 +17,8 @@ from offline_baselines_jax.common.jax_layers import (
     create_mlp,
     get_actor_critic_arch,
 )
+from offline_baselines_jax.common.policies import Model
+from offline_baselines_jax.common.preprocessing import get_action_dim, preprocess_obs
 from offline_baselines_jax.common.type_aliases import Schedule, Params
 
 tfd = tfp.distributions
@@ -31,16 +28,19 @@ LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
 
-@functools.partial(jax.jit, static_argnames=('actor_apply_fn',))
+@functools.partial(jax.jit, static_argnames=("actor_apply_fn", "deterministic"))
 def sample_actions(
-        rng: int,
-        actor_apply_fn: Callable[..., Any],
-        actor_params: Params,
-        observations: Union[np.ndarray, Dict]
-) -> Tuple[int, jnp.ndarray]:
-    dist = actor_apply_fn({'params': actor_params}, observations)
+    rng: jnp.ndarray,
+    actor_apply_fn: Callable[..., Any],
+    actor_params: Params,
+    observations: Union[np.ndarray, Dict],
+    deterministic: bool
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    rng, dropout_key = jax.random.split(rng)
+    rngs = {"dropout": dropout_key}
+    dist = actor_apply_fn({'params': actor_params}, observations, deterministic=deterministic, rngs=rngs)
     rng, key = jax.random.split(rng)
-    return rng, dist.sample(seed=key)
+    return rng, dist.sample(seed=rng)
 
 
 class Actor(nn.Module):
@@ -173,7 +173,7 @@ class SACPolicy(object):
         self.observation_space = observation_space
         self.action_space = action_space
 
-        self.rng, actor_key, critic_key, features_key = jax.random.split(key, 4)
+        self.rng, actor_key, critic_key, features_key, dropout_key = jax.random.split(key, 5)
 
         if net_arch is None:
             if features_extractor_class == NatureCNN:
@@ -208,41 +208,38 @@ class SACPolicy(object):
             dropout=dropout
         )
 
+        # Init dummy inputs
         if isinstance(observation_space, gym.spaces.Dict):
             observation = observation_space.sample()
             for key, _ in observation_space.spaces.items():
-                observation[key] = np.expand_dims(observation[key], axis=0)
+                observation[key] = observation_space[key][np.newaxis, ...]
         else:
-            observation = np.expand_dims(observation_space.sample(), axis=0)
+            observation = observation_space.sample()[np.newaxis, ...]
 
-        actor = Model.create(actor_def, inputs=[actor_key, observation], tx=optax.adam(learning_rate=lr_schedule))
-        if isinstance(observation_space, gym.spaces.Dict):
-            observation = observation_space.sample()
-            for key, _ in observation_space.spaces.items():
-                observation[key] = np.expand_dims(observation[key], axis=0)
-        else:
-            observation = np.expand_dims(observation_space.sample(), axis=0)
+        actor_rngs = {"params": actor_key, "dropout": dropout_key}
+        actor = Model.create(actor_def, inputs=[actor_rngs, observation], tx=optax.adam(learning_rate=lr_schedule))
+
         action = np.expand_dims(action_space.sample(), axis=0)
 
+        critic_rngs = {"params": critic_key, "dropout": dropout_key}
         critic = Model.create(
             critic_def,
-            inputs=[critic_key, observation, action],
+            inputs=[critic_rngs, observation, action],
             tx=optax.adam(learning_rate=lr_schedule)
         )
-        critic_target = Model.create(critic_def, inputs=[critic_key, observation, action])
+        critic_target = Model.create(critic_def, inputs=[critic_rngs, observation, action])
 
         self.actor = actor
         self.critic, self.critic_target = critic, critic_target
 
-    def _predict(self, observation: jnp.ndarray) -> np.ndarray:
-        rng, actions = sample_actions(self.rng, self.actor.apply_fn, self.actor.params, observation)
+    def _predict(self, observation: jnp.ndarray, deterministic: bool) -> np.ndarray:
+        rng, actions = sample_actions(self.rng, self.actor.apply_fn, self.actor.params, observation, deterministic)
 
         self.rng = rng
-        actions = np.asarray(actions)
-        return actions
+        return np.asarray(actions)
 
-    def predict(self, observation: jnp.ndarray, deterministic: bool = False) -> np.ndarray:
-        actions = self._predict(observation)
+    def predict(self, observation: jnp.ndarray, deterministic: bool = True) -> np.ndarray:
+        actions = self._predict(observation, deterministic)
         if isinstance(self.action_space, gym.spaces.Box):
             # Actions could be on arbitrary scale, so clip the actions to avoid
             # out of bound error (e.g. if sampling from a Gaussian distribution)

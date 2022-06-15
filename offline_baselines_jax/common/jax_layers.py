@@ -1,23 +1,24 @@
-from itertools import zip_longest
-from typing import Dict, List, Tuple, Type, Union, Sequence, Callable, Optional, Any
+from typing import Dict, List, Tuple, Type, Union, Sequence, Any
 
-import os
+import flax
+import flax.linen as nn
 import gym
 import jax
-import flax
-import optax
-
 import jax.numpy as jnp
-import flax.linen as nn
 
+from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.preprocessing import is_image_space
 from offline_baselines_jax.common.type_aliases import TensorDict
-from dataclasses import dataclass, field
 
 PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
 Shape = Sequence[int]
 InfoDict = Dict[str, float]
+
+
+def polyak_update(source: Model, target: Model, tau: float) -> Model:
+    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), source.params, target.params)
+    return target.replace(params=new_target_params)
 
 
 def default_init():
@@ -219,13 +220,3 @@ def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> T
         assert "qf" in net_arch, "Error: no key 'qf' was provided in net_arch for the critic network"
         actor_arch, critic_arch = net_arch["pi"], net_arch["qf"]
     return actor_arch, critic_arch
-
-
-if __name__ == '__main__':
-    import numpy as np
-    jax_array = {'aa': jnp.array(np.array([[1, 2], [3, 4]])), 'bb': jnp.array(np.array([[5, 6], [7, 8]]))}
-
-    model = CombinedExtractor(_observation_space=gym.spaces.Dict({'aa': gym.spaces.Box(low=np.zeros(2), high=np.ones(2)),
-                                                                 'bb': gym.spaces.Box(low=np.zeros(2), high=np.ones(2))}))
-    variable = model.init(jax.random.PRNGKey(0), jax_array)
-    print(model.apply(variable, jax_array))

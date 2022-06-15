@@ -7,21 +7,25 @@ import jax.numpy as jnp
 from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.type_aliases import (
     InfoDict,
-    ReplayBufferSamples,
     Params
 )
+from offline_baselines_jax.common.jax_layers import polyak_update
 
 
 def log_ent_coef_update(
-    key:Any,
+    rng:Any,
     log_ent_coef: Model,
     actor: Model,
+
+    observations: jnp.ndarray,
+
     target_entropy: float,
-    replay_data:ReplayBufferSamples
 ) -> Tuple[Model, InfoDict]:
+    dropout_key, _ = jax.random.split(rng)
+
     def temperature_loss_fn(ent_params: Params):
-        dist = actor(replay_data.observations)
-        actions_pi = dist.sample(seed=key)
+        dist = actor(observations, deterministic=False, rngs={"dropout": dropout_key})
+        actions_pi = dist.sample(seed=rng)
         log_prob = dist.log_prob(actions_pi)
 
         ent_coef = log_ent_coef.apply_fn({'params': ent_params})
@@ -33,15 +37,28 @@ def log_ent_coef_update(
     return new_ent_coef, info
 
 
-def sac_actor_update(key: int, actor: Model, critic: Model, log_ent_coef: Model, replay_data: ReplayBufferSamples):
+def sac_actor_update(
+    rng: int,
+    actor: Model,
+    critic: Model,
+    log_ent_coef: Model,
+
+    observations: jnp.ndarray,
+):
+    dropout_key, _ = jax.random.split(rng)
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
-        dist = actor.apply_fn({'params': actor_params}, replay_data.observations)
-        actions_pi = dist.sample(seed=key)
+        dist = actor.apply_fn(
+            {'params': actor_params},
+            observations,
+            deterministic=False,
+            rngs={"dropout": dropout_key}
+        )
+        actions_pi = dist.sample(seed=rng)
         log_prob = dist.log_prob(actions_pi)
 
         ent_coef = jnp.exp(log_ent_coef())
 
-        q_values_pi = critic(replay_data.observations, actions_pi)
+        q_values_pi = critic(observations, actions_pi, deterministic=False, rngs={"dropout": dropout_key})
         min_qf_pi = jnp.min(q_values_pi, axis=1)
 
         actor_loss = (ent_coef * log_prob - min_qf_pi).mean()
@@ -52,32 +69,46 @@ def sac_actor_update(key: int, actor: Model, critic: Model, log_ent_coef: Model,
 
 
 def sac_critic_update(
-    key:Any,
+    rng:Any,
     actor: Model,
     critic: Model,
     critic_target: Model,
     log_ent_coef: Model,
-    replay_data: ReplayBufferSamples,
+
+    observations: jnp.ndarray,
+    actions: jnp.ndarray,
+    next_observations: jnp.ndarray,
+    rewards: jnp.ndarray,
+    dones: jnp.ndarray,
+
     gamma:float
 ):
-    dist = actor(replay_data.next_observations)
-    next_actions = dist.sample(seed=key)
+    dropout_key, _ = jax.random.split(rng)
+
+    dist = actor(next_observations, deterministic=False, rngs={"dropout": dropout_key})
+    next_actions = dist.sample(seed=rng)
     next_log_prob = dist.log_prob(next_actions)
 
     # Compute the next Q values: min over all critics targets
-    next_q_values = critic_target(replay_data.next_observations, next_actions)
+    next_q_values = critic_target(next_observations, next_actions, deterministic=False, rngs={"dropout": dropout_key})
     next_q_values = jnp.min(next_q_values, axis=1)
 
     ent_coef = jnp.exp(log_ent_coef())
     # add entropy term
     next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
     # td error + entropy term
-    target_q_values = replay_data.rewards + (1 - replay_data.dones) * gamma * next_q_values
+    target_q_values = rewards + (1 - dones) * gamma * next_q_values
 
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
-        q_values= critic.apply_fn({'params': critic_params}, replay_data.observations, replay_data.actions)
+        q_values= critic.apply_fn(
+            {'params': critic_params},
+            observations,
+            actions,
+            deterministic=False,
+            rngs={"dropout": dropout_key}
+        )
 
         # Compute critic loss
         n_qs = q_values.shape[1]
@@ -91,10 +122,6 @@ def sac_critic_update(
     return new_critic, info
 
 
-def target_update(critic: Model, critic_target: Model, tau: float) -> Model:
-    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), critic.params, critic_target.params)
-    return critic_target.replace(params=new_target_params)
-
 
 @functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update'))
 def sac_update(
@@ -103,7 +130,13 @@ def sac_update(
     critic: Model,
     critic_target: Model,
     log_ent_coef: Model,
-    replay_data: ReplayBufferSamples,
+
+    observations: jnp.ndarray,
+    actions: jnp.ndarray,
+    rewards: jnp.ndarray,
+    next_observations: jnp.ndarray,
+    dones: jnp.ndarray,
+
     gamma: float,
     target_entropy: float,
     tau: float,
@@ -112,18 +145,43 @@ def sac_update(
 ):
 
     rng, key = jax.random.split(rng, 2)
-    new_critic, critic_info = sac_critic_update(key, actor, critic, critic_target, log_ent_coef, replay_data, gamma)
+    new_critic, critic_info = sac_critic_update(
+        rng=rng,
+        actor=actor,
+        critic=critic,
+        critic_target=critic_target,
+        log_ent_coef=log_ent_coef,
+        observations=observations,
+        actions=actions,
+        next_observations=next_observations,
+        rewards=rewards,
+        dones=dones,
+        gamma=gamma
+    )
+
     if target_update_cond:
-        new_critic_target = target_update(new_critic, critic_target, tau)
+        new_critic_target = polyak_update(new_critic, critic_target, tau)
     else:
         new_critic_target = critic_target
 
     rng, key = jax.random.split(rng, 2)
-    new_actor, actor_info = sac_actor_update(key, actor, new_critic, log_ent_coef, replay_data)
+    new_actor, actor_info = sac_actor_update(
+        rng=rng,
+        actor=actor,
+        critic=critic,
+        log_ent_coef=log_ent_coef,
+        observations=observations
+    )
 
     rng, key = jax.random.split(rng, 2)
     if entropy_update:
-        new_temp, ent_info = log_ent_coef_update(key, log_ent_coef, new_actor, target_entropy, replay_data)
+        new_temp, ent_info = log_ent_coef_update(
+            rng=rng,
+            log_ent_coef=log_ent_coef,
+            actor=actor,
+            observations=observations,
+            target_entropy=target_entropy
+        )
     else:
         new_temp, ent_info = log_ent_coef, {'ent_coef': jnp.exp(log_ent_coef()), 'ent_coef_loss': 0}
 

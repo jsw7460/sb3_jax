@@ -132,16 +132,19 @@ class SAC(OffPolicyAlgorithm):
             # Note: we optimize the log of the entropy coeff which is slightly different from the paper
             # as discussed in https://github.com/rail-berkeley/softlearning/issues/37
             log_ent_coef_def = LogEntropyCoef(init_value)
-            self.key, temp_key = jax.random.split(self.key, 2)
-            self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key],
-                                             tx=optax.adam(learning_rate=self.lr_schedule(1)))
+            self.rng, temp_key = jax.random.split(self.rng, 2)
+            self.log_ent_coef = Model.create(
+                log_ent_coef_def,
+                inputs=[temp_key],
+                tx=optax.adam(learning_rate=self.lr_schedule(1))
+            )
 
         else:
             # Force conversion to float
             # this will throw an error if a malformed string (different from 'auto')
             # is passed
             log_ent_coef_def = LogEntropyCoef(self.ent_coef)
-            self.key, temp_key = jax.random.split(self.key, 2)
+            self.rng, temp_key = jax.random.split(self.rng, 2)
             self.log_ent_coef = Model.create(log_ent_coef_def, inputs=[temp_key])
             self.entropy_update = False
 
@@ -158,22 +161,27 @@ class SAC(OffPolicyAlgorithm):
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size=batch_size)
 
-            self.key, key = jax.random.split(self.key, 2)
+            self.rng, key = jax.random.split(self.rng, 2)
             target_update_cond = gradient_step % self.target_update_interval == 0
 
-            self.key, new_models, info \
+            self.rng, new_models, info \
                 = sac_update(
-                    key,
-                    self.actor,
-                    self.critic,
-                    self.critic_target,
-                    self.log_ent_coef,
-                    replay_data,
-                    self.gamma,
-                    self.target_entropy,
-                    self.tau,
-                    target_update_cond,
-                    self.entropy_update
+                    rng=key,
+                    actor=self.actor,
+                    critic=self.critic,
+                    critic_target=self.critic_target,
+                    log_ent_coef=self.log_ent_coef,
+
+                    observations=replay_data.observations,
+                    actions=replay_data.actions,
+                    rewards=replay_data.actions,
+                    next_observations=replay_data.next_observations,
+                    dones=replay_data.dones,
+                    gamma=self.gamma,
+                    target_entropy=self.target_entropy,
+                    tau=self.tau,
+                    target_update_cond=target_update_cond,
+                    entropy_update=self.entropy_update
             )
 
             ent_coef_losses.append(info['ent_coef_loss'])
@@ -221,15 +229,17 @@ class SAC(OffPolicyAlgorithm):
         )
 
     def _excluded_save_params(self) -> List[str]:
-        return super(SAC, self)._excluded_save_params() + ["actor", "critic", "critic_target", "log_ent_coef"]
+        return super(SAC, self)._excluded_save_params() + SAC_COMPONENTS
 
     def _get_jax_save_params(self) -> Dict[str, Params]:
         params_dict = {}
-        params_dict['actor'] = self.actor.params
-        params_dict['critic'] = self.critic.params
-        params_dict['critic_target'] = self.critic_target.params
-        params_dict['log_ent_coef'] = self.log_ent_coef.params
+        for comp_str in SAC_COMPONENTS:
+            comp = getattr(self, comp_str)
+            params_dict[comp_str] = comp.params
         return params_dict
 
     def _get_jax_load_params(self) -> List[str]:
-        return ['actor', 'critic', 'critic_target', 'log_ent_coef']
+        return SAC_COMPONENTS
+
+
+SAC_COMPONENTS = ["actor", "critic", "critic_target", "log_ent_coef"]
