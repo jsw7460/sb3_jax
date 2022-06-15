@@ -1,56 +1,52 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*/__pycache__/*
-*.py[cod]
-
-# C extensions
-*.so
-
-# Distribution / packaging
-bin/
-build/
-develop-eggs/
-dist/
-eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-.tox/
+*.swp
+*.pyc
+*.pkl
+*.py~
+*.bak
+.pytest_cache
+.DS_Store
+.idea
+.vscode
 .coverage
+.coverage.*
+__pycache__/
+_build/
+*.npz
+*.pth
+.pytype/
+git_rewrite_commit_history.sh
+
+# Setuptools distribution and build folders.
+/dist/
+/build
+keys/
+
+# Virtualenv
+/env
+/venv
+
+
+*.sublime-project
+*.sublime-workspace
+
+.idea
+
+logs/
+
+.ipynb_checkpoints
+ghostdriver.log
+
+htmlcov
+
+junk
+src
+
+*.egg-info
 .cache
-nosetests.xml
-coverage.xml
+*.lprof
+*.prof
 
-# Translations
-*.mo
-
-# Mr Developer
-.mr.developer.cfg
-.project
-.pydevproject
-
-# Rope
-.ropeproject
-
-# Django stuff:
-*.log
-*.pot
-
-# Sphinx documentation
-docs/_build/
-
-
+MUJOCO_LOG.TXT
 2dnavi.py
 2dnavioff.py
 foo*
@@ -68,5 +64,6 @@ backup/
 runs/
 .hydra/*
 *.yaml
+
 d4rl_maze/
 outputs/

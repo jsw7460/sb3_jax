@@ -160,6 +160,7 @@ def configure_logger(
             format_strings = ["tensorboard"]
     elif verbose == 0:
         format_strings = [""]
+
     return configure(save_path, format_strings=format_strings)
 
 

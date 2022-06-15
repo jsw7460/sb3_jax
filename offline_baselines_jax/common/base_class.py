@@ -88,7 +88,6 @@ class BaseAlgorithm(ABC):
         supported_action_spaces: Optional[Tuple[gym.spaces.Space, ...]] = None,
         without_exploration: bool = False,
     ):
-
         self.policy_class = policy
         self.env = None  # type: Optional[GymEnv]
         # get VecNormalize object if needed
@@ -358,7 +357,7 @@ class BaseAlgorithm(ABC):
 
         if self.ep_info_buffer is None or reset_num_timesteps:
             # Initialize buffers if they don't exist, or reinitialize if resetting counters
-            self.ep_info_buffer = deque(maxlen=100)
+            self.ep_info_buffer = deque(maxlen=100)       # 원래 100인데 내가 바꿨다.
             self.ep_success_buffer = deque(maxlen=100)
 
         if self.action_noise is not None and not self.without_exploration:
@@ -544,7 +543,7 @@ class BaseAlgorithm(ABC):
             module and each of their parameters, otherwise raises an Exception. If set to False, this
             can be used to update only specific parameters.
         """
-        params = None
+
         if isinstance(load_path_or_dict, dict):
             params = load_path_or_dict
         else:
@@ -565,6 +564,7 @@ class BaseAlgorithm(ABC):
                 # possible something else too (e.g. if key is an int?).
                 # Catch anything for now.
                 raise ValueError(f"Key {name} is an invalid object name.")
+
             jax_model = attr.load_dict(params[name])
             recursive_setattr(self, name, jax_model)
             updated_objects.add(name)

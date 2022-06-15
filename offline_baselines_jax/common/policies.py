@@ -1,14 +1,13 @@
 """Policies: abstract base class and concrete implementations."""
 
-from typing import Any, Optional, Tuple, Union, Callable,Sequence
+import os
+from typing import Any, Optional, Tuple, Union, Callable, Sequence
 
-import optax
-import gym
 import flax
 import flax.linen as nn
-import jax.numpy as jnp
 import jax
-import os
+import jax.numpy as jnp
+import optax
 
 from offline_baselines_jax.common.type_aliases import Params
 

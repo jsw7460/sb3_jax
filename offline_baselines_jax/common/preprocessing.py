@@ -2,6 +2,7 @@ import warnings
 from typing import Dict, Tuple, Union
 
 import numpy as np
+import jax.numpy as jnp
 from gym import spaces
 
 def is_image_space_channels_first(observation_space: spaces.Box) -> bool:
@@ -162,3 +163,37 @@ def check_for_nested_spaces(obs_space: spaces.Space):
                 raise NotImplementedError(
                     "Nested observation spaces are not supported (Tuple/Dict space inside Tuple/Dict space)."
                 )
+
+
+def preprocess_obs(
+    obs: jnp.ndarray,
+    observation_space: spaces.Space,
+    normalize_images: bool = True
+):
+    if isinstance(observation_space, spaces.Box):
+        if is_image_space(observation_space) and normalize_images:
+            obs = obs.transpose(0, 2, 3, 1)
+            return obs / 255.0
+        return obs
+
+    elif isinstance(observation_space, spaces.Discrete):
+        n_classes = observation_space.n
+        return np.eye(n_classes)[obs]
+
+    elif isinstance(observation_space, spaces.MultiDiscrete):
+        return np.concatenate(
+            [np.eye(observation_space.nvec[idx])[obs_] for idx, obs_ in enumerate(np.split(obs, 1, axis=1))]
+        ).view(obs.shape[0], sum(observation_space.nvec))
+
+    elif isinstance(observation_space, spaces.MultiBinary):
+        return obs
+
+    elif isinstance(observation_space, spaces.Dict):
+        # Do not modify by reference the original observation
+        preprocessed_obs = {}
+        for key, _obs in obs.items():
+            preprocessed_obs[key] = preprocess_obs(_obs, observation_space[key], normalize_images=normalize_images)
+        return preprocessed_obs
+
+    else:
+        raise NotImplementedError(f"Preprocessing not implemented for {observation_space}")

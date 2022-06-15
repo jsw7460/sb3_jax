@@ -24,6 +24,16 @@ def default_init():
     return nn.initializers.lecun_normal()
 
 
+class Sequential(nn.Module):
+    layers: Sequence[nn.Module]
+
+    @nn.compact
+    def __call__(self, x, *args, **kwargs):
+      for layer in self.layers:
+        x = layer(x, *args, **kwargs)
+      return x
+
+
 class BaseFeaturesExtractor(nn.Module):
     """
     Base class that represents a features extractor.
@@ -71,6 +81,14 @@ class NatureCNN(BaseFeaturesExtractor):
         x = nn.relu(x)
         x = x.reshape((x.shape[0], -1)) # flatten
 
+        # x = nn.Conv(features=16, kernel_size=(3, 3), strides=2)(observations)
+        # x = nn.relu(x)
+        # x = nn.Conv(features=32, kernel_size=(3, 3), strides=2)(x)
+        # x = nn.relu(x)
+        # x = nn.Conv(features=16, kernel_size=(3, 3), strides=2)(x)
+        # x = nn.relu(x)
+        # x = x.reshape((x.shape[0], -1)) # flatten
+
         x = nn.Dense(features=self.feature_dim)(x)
         x = nn.relu(x)
         return x
@@ -100,12 +118,17 @@ class MLP(nn.Module):
     dropout: float = 0.0
     squashed_out: bool = False
 
+    layernorm: bool = False
+
     @nn.compact
     def __call__(self, x, deterministic: bool = False):
         for feature in self.net_arch[:-1]:
             x = self.activation_fn(nn.Dense(feature, kernel_init=default_init())(x))
             x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
-        x = nn.Dense(self.net_arch[-1], kernel_init=default_init())(x)
+            if self.layernorm:
+                x = nn.LayerNorm()(x)
+        if len(self.net_arch) > 0:
+            x = nn.Dense(self.net_arch[-1], kernel_init=default_init())(x)
         if self.squashed_out:
             return nn.tanh(x)
         else:
@@ -118,11 +141,13 @@ def create_mlp(
     activation_fn: Type[nn.Module] = nn.relu,
     dropout: float = 0.0,
     squash_output: bool = False,
+
+    layernorm: bool = False
 ) -> nn.Module:
     if output_dim > 0:
         net_arch = list(net_arch)
         net_arch.append(output_dim)
-    return MLP(net_arch, activation_fn, dropout, squash_output)
+    return MLP(net_arch, activation_fn, dropout, squash_output, layernorm)
 
 
 class CombinedExtractor(BaseFeaturesExtractor):

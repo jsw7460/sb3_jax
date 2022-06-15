@@ -13,7 +13,7 @@ from tensorflow_probability.substrates import jax as tfp
 
 
 from offline_baselines_jax.common.policies import Model
-from offline_baselines_jax.common.preprocessing import get_action_dim
+from offline_baselines_jax.common.preprocessing import get_action_dim, preprocess_obs
 from offline_baselines_jax.common.jax_layers import (
     BaseFeaturesExtractor,
     CombinedExtractor,
@@ -21,7 +21,6 @@ from offline_baselines_jax.common.jax_layers import (
     NatureCNN,
     create_mlp,
     get_actor_critic_arch,
-    default_init,
 )
 from offline_baselines_jax.common.type_aliases import Schedule, Params
 
@@ -34,9 +33,10 @@ LOG_STD_MIN = -20
 
 @functools.partial(jax.jit, static_argnames=('actor_apply_fn',))
 def sample_actions(
-        rng: int, actor_apply_fn: Callable[..., Any],
+        rng: int,
+        actor_apply_fn: Callable[..., Any],
         actor_params: Params,
-        observations: np.ndarray
+        observations: Union[np.ndarray, Dict]
 ) -> Tuple[int, jnp.ndarray]:
     dist = actor_apply_fn({'params': actor_params}, observations)
     rng, key = jax.random.split(rng)
@@ -45,6 +45,7 @@ def sample_actions(
 
 class Actor(nn.Module):
     features_extractor: nn.Module
+    observation_space: gym.spaces.Space
     action_space: gym.spaces.Space
     net_arch: List[int]
     activation_fn: Type[nn.Module] = nn.relu
@@ -73,12 +74,14 @@ class Actor(nn.Module):
         deterministic: bool = False,
         **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        observations = preprocess_obs(observations, self.observation_space)
         features = self.features_extractor(observations, **kwargs)
 
         latent_pi = self.latent_pi(features, deterministic=deterministic)
         mean_actions = self.mu(latent_pi, deterministic=deterministic)
         log_stds = self.log_std(latent_pi, deterministic=deterministic)
         log_stds = jnp.clip(log_stds, LOG_STD_MIN, LOG_STD_MAX)
+
         return mean_actions, log_stds
 
     def actions_from_params(self, mean: jnp.ndarray, log_std: jnp.ndarray):
@@ -87,9 +90,9 @@ class Actor(nn.Module):
         return sampling_dist
 
 
-
 class SingleCritic(nn.Module):
     features_extractor: nn.Module
+    observation_space: gym.spaces.Space
     net_arch: List[int]
     dropout: float
     activation_fn: Type[nn.Module] = nn.relu
@@ -112,12 +115,15 @@ class SingleCritic(nn.Module):
         actions: jnp.ndarray,
         deterministic: bool = False
     ):
-        q_input = jnp.concatenate((observations, actions), axis=1)
+        observations = preprocess_obs(observations, self.observation_space)
+        features = self.features_extractor(observations)
+        q_input = jnp.concatenate((features, actions), axis=1)
         return self.q_net(q_input, deterministic=deterministic)
 
 
 class Critic(nn.Module):
     features_extractor: nn.Module
+    observation_space: gym.spaces.Space
     net_arch: List[int]
     dropout: float = 0.0
     activation_fn: Type[nn.Module] = nn.relu
@@ -129,12 +135,18 @@ class Critic(nn.Module):
         batch_qs = nn.vmap(
             SingleCritic,
             in_axes=None,
-            out_axes=1,
-            variable_axes={"params": 1},
+            out_axes=1,     # 1
+            variable_axes={"params": 1},        # 1
             split_rngs={"params": True, "dropout": True},
             axis_size=self.n_critics
         )
-        self.q_networks = batch_qs(self.features_extractor, self.net_arch, self.dropout, self.activation_fn)
+        self.q_networks = batch_qs(
+            self.features_extractor,
+            self.observation_space,
+            self.net_arch,
+            self.dropout,
+            self.activation_fn
+        )
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -156,6 +168,7 @@ class SACPolicy(object):
         features_extractor_class: Type[BaseFeaturesExtractor] = FlattenExtractor,
         features_extractor_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
+        dropout: float = 0.0,
     ):
         self.observation_space = observation_space
         self.action_space = action_space
@@ -179,15 +192,20 @@ class SACPolicy(object):
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
         actor_def = Actor(
             features_extractor=features_extractor_def,
+            observation_space=observation_space,
             action_space=action_space,
             net_arch=actor_arch,
-            activation_fn=activation_fn
+            activation_fn=activation_fn,
+            dropout=dropout
         )
+
         critic_def = Critic(
             features_extractor=features_extractor_def,
+            observation_space=observation_space,
             net_arch=critic_arch,
             activation_fn=activation_fn,
-            n_critics=n_critics
+            n_critics=n_critics,
+            dropout=dropout
         )
 
         if isinstance(observation_space, gym.spaces.Dict):
@@ -198,7 +216,6 @@ class SACPolicy(object):
             observation = np.expand_dims(observation_space.sample(), axis=0)
 
         actor = Model.create(actor_def, inputs=[actor_key, observation], tx=optax.adam(learning_rate=lr_schedule))
-
         if isinstance(observation_space, gym.spaces.Dict):
             observation = observation_space.sample()
             for key, _ in observation_space.spaces.items():
@@ -296,6 +313,7 @@ class CnnPolicy(SACPolicy):
         features_extractor_class: Type[BaseFeaturesExtractor] = NatureCNN,
         features_extractor_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
+        dropout: float = 0.0,
     ):
         super(CnnPolicy, self).__init__(
             key,
@@ -307,6 +325,7 @@ class CnnPolicy(SACPolicy):
             features_extractor_class,
             features_extractor_kwargs,
             n_critics,
+            dropout
         )
 
 
@@ -351,6 +370,7 @@ class MultiInputPolicy(SACPolicy):
         features_extractor_class: Type[BaseFeaturesExtractor] = CombinedExtractor,
         features_extractor_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
+        dropout: float = 0.0,
     ):
         super(MultiInputPolicy, self).__init__(
             key,
@@ -362,4 +382,5 @@ class MultiInputPolicy(SACPolicy):
             features_extractor_class,
             features_extractor_kwargs,
             n_critics,
+            dropout
         )

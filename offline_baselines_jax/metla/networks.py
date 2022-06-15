@@ -8,7 +8,7 @@ import numpy as np
 import tensorflow_probability
 from tensorflow_probability.substrates import jax as tfp
 
-from offline_baselines_jax.common.jax_layers import create_mlp
+from offline_baselines_jax.common.jax_layers import create_mlp, Sequential
 from .buffer import TrajectoryBuffer
 
 tfd = tfp.distributions
