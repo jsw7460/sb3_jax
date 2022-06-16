@@ -212,7 +212,7 @@ class SACPolicy(object):
         if isinstance(observation_space, gym.spaces.Dict):
             observation = observation_space.sample()
             for key, _ in observation_space.spaces.items():
-                observation[key] = observation_space[key][np.newaxis, ...]
+                observation[key] = observation[key][np.newaxis, ...]
         else:
             observation = observation_space.sample()[np.newaxis, ...]
 

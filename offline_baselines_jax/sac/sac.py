@@ -18,7 +18,6 @@ from offline_baselines_jax.common.type_aliases import (
     Params
 )
 from offline_baselines_jax.sac.policies import SACPolicy
-
 from .core import sac_update
 
 

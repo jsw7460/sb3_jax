@@ -11,6 +11,7 @@ import flax
 from stable_baselines3.common import callbacks
 from stable_baselines3.common import vec_env
 
+
 GymEnv = Union[gym.Env, vec_env.VecEnv]
 GymObs = Union[Tuple, Dict[str, Any], np.ndarray, int]
 GymStepReturn = Tuple[GymObs, float, bool, Dict]

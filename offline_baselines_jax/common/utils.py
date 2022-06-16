@@ -7,8 +7,9 @@ from itertools import zip_longest
 from typing import Dict, Iterable, Optional, Tuple, Union
 
 import gym
-import numpy as np
 import jax
+import numpy as np
+
 import offline_baselines_jax
 
 # Check if tensorboard is available for pytorch
@@ -18,7 +19,7 @@ except ImportError:
     SummaryWriter = None
 
 from stable_baselines3.common.logger import Logger, configure
-from offline_baselines_jax.common.type_aliases import GymEnv, Schedule, TensorDict, TrainFreq, TrainFrequencyUnit
+from offline_baselines_jax.common.type_aliases import GymEnv, Schedule, TrainFreq, TrainFrequencyUnit
 
 
 def set_random_seed(seed: int) -> None:
