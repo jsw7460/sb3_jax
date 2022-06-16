@@ -178,4 +178,4 @@ def update_td3(
         "actor_target": new_actor_target
     }
 
-    return rng, new_models, {**critic_info, **actor_info}
+    return rng, new_models, {**critic_info, **actor_info, "actor_update_cond": actor_update_cond}

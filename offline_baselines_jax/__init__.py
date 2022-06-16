@@ -4,8 +4,6 @@ from offline_baselines_jax.common.utils import get_system_info
 from offline_baselines_jax.sac import SAC
 from offline_baselines_jax.cql import CQL
 from offline_baselines_jax.td3 import TD3
-from offline_baselines_jax.metla import METLAMLE
-from offline_baselines_jax.sopt import PosGoalImgSubgoalSAC
 
 # Read version from file
 version_file = os.path.join(os.path.dirname(__file__), "version.txt")

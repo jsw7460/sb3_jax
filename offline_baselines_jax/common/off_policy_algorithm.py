@@ -346,12 +346,15 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             if k == "actor":
                 self.actor = v
                 self.policy.actor = v
+
             elif k == "critic":
                 self.critic = v
                 self.policy.critic = v
+
             elif k == "critic_target":
                 self.critic_target = v
                 self.policy.critic_target = v
+
             else:
                 setattr(self, k, v)
 

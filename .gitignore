@@ -69,3 +69,6 @@ d4rl_maze/
 outputs/
 offline_data/
 tests/
+prior_sopt_train.py
+online_test.py
+metla_train.py
