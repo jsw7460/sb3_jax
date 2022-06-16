@@ -10,8 +10,6 @@ This library is based on Stable Baselines 3 (https://github.com/DLR-RM/stable-ba
 |----------------|---------------------| ------------------ | ------------------ | ------------------- | ------------------ | --------------------------------- |
 | SAC            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
 | CQL            | :x:                 | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| Multi-task SAC | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| Multi-task CQL | :x:                 | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
 | TD3            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
 
 ### Windows 10
