@@ -72,3 +72,4 @@ tests/
 prior_sopt_train.py
 online_test.py
 metla_train.py
+*train.py
