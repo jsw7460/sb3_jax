@@ -4,14 +4,6 @@ Offline Baselines with JAX is a set of implementations of reinforcement learning
 
 This library is based on Stable Baselines 3 (https://github.com/DLR-RM/stable-baselines3), and JAXRL (https://github.com/ikostrikov/jaxrl).
 
-## Implemented Algorithms
-
-| **Name**       | **Online_learning** | `Box`          | `Discrete`     | `MultiDiscrete` | `MultiBinary`  | **Multi Processing**              |
-|----------------|---------------------| ------------------ | ------------------ | ------------------- | ------------------ | --------------------------------- |
-| SAC            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| CQL            | :x:                 | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-| TD3            | :heavy_check_mark:  | :heavy_check_mark: | :x:                | :x:                 | :x:                | :heavy_check_mark: |
-
 ### Windows 10
 
 Offline baselines does not support Window OS.
