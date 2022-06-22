@@ -16,13 +16,13 @@ Shape = Sequence[int]
 InfoDict = Dict[str, float]
 
 
+def default_init():
+    return nn.initializers.kaiming_uniform()
+
+
 def polyak_update(source: Model, target: Model, tau: float) -> Model:
     new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), source.params, target.params)
     return target.replace(params=new_target_params)
-
-
-def default_init():
-    return nn.initializers.lecun_normal()
 
 
 class Sequential(nn.Module):
@@ -80,37 +80,29 @@ class NatureCNN(BaseFeaturesExtractor):
         x = nn.relu(x)
         x = nn.Conv(features=64, kernel_size=(3, 3), strides=(1, 1))(x)
         x = nn.relu(x)
-        x = x.reshape((x.shape[0], -1)) # flatten
-
-        # x = nn.Conv(features=16, kernel_size=(3, 3), strides=2)(observations)
-        # x = nn.relu(x)
-        # x = nn.Conv(features=32, kernel_size=(3, 3), strides=2)(x)
-        # x = nn.relu(x)
-        # x = nn.Conv(features=16, kernel_size=(3, 3), strides=2)(x)
-        # x = nn.relu(x)
-        # x = x.reshape((x.shape[0], -1)) # flatten
+        x = x.reshape((x.shape[0], -1))     # flatten
 
         x = nn.Dense(features=self.feature_dim)(x)
         x = nn.relu(x)
         return x
 
 
-class ModuleLayer(nn.Module):
-    net_arch: List[int]
-    activation_fn: Type[nn.Module] = nn.relu
-    n_modules: int = 2
-    last_activation: bool = False
-
-    @nn.compact
-    def __call__(self, inputs: jnp.ndarray):
-        VmapCritic = nn.vmap(MLP,
-                             variable_axes={'params': 0},
-                             split_rngs={'params': True},
-                             in_axes=None,
-                             out_axes=0,
-                             axis_size=self.n_modules)
-        qs = VmapCritic(self.net_arch, self.activation_fn, self.last_activation)(inputs)
-        return qs
+# class ModuleLayer(nn.Module):
+#     net_arch: List[int]
+#     activation_fn: Type[nn.Module] = nn.relu
+#     n_modules: int = 2
+#     last_activation: bool = False
+#
+#     @nn.compact
+#     def __call__(self, inputs: jnp.ndarray):
+#         VmapCritic = nn.vmap(MLP,
+#                              variable_axes={'params': 0},
+#                              split_rngs={'params': True},
+#                              in_axes=None,
+#                              out_axes=0,
+#                              axis_size=self.n_modules)
+#         qs = VmapCritic(self.net_arch, self.activation_fn, self.last_activation)(inputs)
+#         return qs
 
 
 class MLP(nn.Module):

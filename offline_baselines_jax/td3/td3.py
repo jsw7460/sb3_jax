@@ -1,22 +1,15 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import gym
-import numpy as np
-import flax.linen as nn
-import jax.numpy as jnp
 import jax
-import optax
-import functools
-
-from offline_baselines_jax.common.policies import Model
-from offline_baselines_jax.common.buffers import ReplayBuffer
+import numpy as np
 from stable_baselines3.common.noise import ActionNoise
+
+from offline_baselines_jax.common.buffers import ReplayBuffer
 from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
-from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, InfoDict, ReplayBufferSamples, Params
+from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, Params
 from offline_baselines_jax.td3.policies import TD3Policy
-
 from .core import update_td3
-
 
 
 class TD3(OffPolicyAlgorithm):
@@ -25,7 +18,7 @@ class TD3(OffPolicyAlgorithm):
         self,
         env: Union[GymEnv, str],
         policy: Union[str, Type[TD3Policy]] = TD3Policy,
-        learning_rate: Union[float, Schedule] = 1e-4,
+        learning_rate: Union[float, Schedule] = 1e-3,
         buffer_size: int = 1_000_000,  # 1e6
         learning_starts: int = 100,
         batch_size: int = 100,
@@ -97,15 +90,13 @@ class TD3(OffPolicyAlgorithm):
 
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         actor_losses, critic_losses, coef_lambda = [], [], []
-
         for _ in range(gradient_steps):
             self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
             self.rng, key = jax.random.split(self.rng, 2)
 
-            actor_update_cond = self._n_updates % self.policy_delay == 0
-
+            actor_update_cond = (self._n_updates % self.policy_delay == 0)
             self.rng, new_models, info = \
                 update_td3(
                     key,

@@ -18,6 +18,7 @@ STATIC_ARGNAMES = (
     "actor_update_cond"
 )
 
+
 def td3_critic_update(
     rng:Any,
     critic: Model,
@@ -38,7 +39,7 @@ def td3_critic_update(
     dropout_key, _ = jax.random.split(rng)
 
     # Select action according to policy and add clipped noise
-    noise = jax.random.normal(rng) * target_policy_noise
+    noise = jax.random.normal(rng, shape=actions.shape) * jnp.sqrt(target_policy_noise)
     noise = jnp.clip(noise, -target_noise_clip, target_noise_clip)
     next_actions = actor_target(next_observations, rngs={"dropout": dropout_key})
     next_actions = jnp.clip(next_actions + noise, -1.0, 1.0)
@@ -60,8 +61,8 @@ def td3_critic_update(
         # Compute critic loss
         n_qs = q_values.shape[1]
 
-        critic_loss = sum([jnp.mean((target_q_values - q_values[:, i, ...]) ** 2) for i in range(n_qs)])
-        critic_loss = critic_loss / n_qs
+        critic_loss = sum(jnp.mean((target_q_values - q_values[:, i, ...]) ** 2) for i in range(n_qs))
+        # critic_loss = critic_loss / n_qs
         return critic_loss, {'critic_loss': critic_loss, 'current_q': q_values.mean()}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
@@ -158,7 +159,7 @@ def update_td3(
         new_actor, actor_info = td3_actor_update(
             rng=rng,
             actor=actor,
-            critic=critic,
+            critic=new_critic,
             observations=observations,
             actions=actions,
             alpha=alpha,

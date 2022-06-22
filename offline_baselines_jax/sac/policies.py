@@ -215,11 +215,10 @@ class SACPolicy(object):
                 observation[key] = observation[key][np.newaxis, ...]
         else:
             observation = observation_space.sample()[np.newaxis, ...]
+        action = action_space.sample()[np.newaxis, ...]
 
         actor_rngs = {"params": actor_key, "dropout": dropout_key}
         actor = Model.create(actor_def, inputs=[actor_rngs, observation], tx=optax.adam(learning_rate=lr_schedule))
-
-        action = np.expand_dims(action_space.sample(), axis=0)
 
         critic_rngs = {"params": critic_key, "dropout": dropout_key}
         critic = Model.create(

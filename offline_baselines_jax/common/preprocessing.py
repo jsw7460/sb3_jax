@@ -172,7 +172,6 @@ def preprocess_obs(
 ):
     if isinstance(observation_space, spaces.Box):
         if is_image_space(observation_space) and normalize_images:
-            obs = obs.transpose(0, 2, 3, 1)
             return obs / 255.0
         return obs
 

@@ -9,13 +9,25 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Type, Union
 
 import gym
 import numpy as np
-
-from stable_baselines3.common.logger import Logger
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList, ConvertCallback, EvalCallback
 from stable_baselines3.common.env_util import is_wrapped
+from stable_baselines3.common.logger import Logger
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.noise import ActionNoise
-from stable_baselines3.common.vec_env import (
+
+from offline_baselines_jax.common import utils
+from offline_baselines_jax.common.preprocessing import check_for_nested_spaces, is_image_space, \
+    is_image_space_channels_first
+from offline_baselines_jax.common.save_util import load_from_zip_file, recursive_getattr, recursive_setattr, \
+    save_to_zip_file
+from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, Params
+from offline_baselines_jax.common.utils import (
+    check_for_correct_spaces,
+    get_schedule_fn,
+    get_system_info,
+    set_random_seed,
+)
+from offline_baselines_jax.common.vec_env import (
     DummyVecEnv,
     VecEnv,
     VecNormalize,
@@ -23,18 +35,6 @@ from stable_baselines3.common.vec_env import (
     is_vecenv_wrapped,
     unwrap_vec_normalize,
 )
-
-from offline_baselines_jax.common.utils import (
-    check_for_correct_spaces,
-    get_schedule_fn,
-    get_system_info,
-    set_random_seed,
-)
-
-from offline_baselines_jax.common import utils
-from offline_baselines_jax.common.preprocessing import check_for_nested_spaces, is_image_space, is_image_space_channels_first
-from offline_baselines_jax.common.save_util import load_from_zip_file, recursive_getattr, recursive_setattr, save_to_zip_file
-from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, Params
 
 
 def maybe_make_env(env: Union[GymEnv, str, None], verbose: int) -> Optional[GymEnv]:
@@ -196,10 +196,10 @@ class BaseAlgorithm(ABC):
                 # the other channel last), VecTransposeImage will throw an error
                 for space in env.observation_space.spaces.values():
                     wrap_with_vectranspose = wrap_with_vectranspose or (
-                        is_image_space(space) and not is_image_space_channels_first(space)
+                        is_image_space(space) and is_image_space_channels_first(space)
                     )
             else:
-                wrap_with_vectranspose = is_image_space(env.observation_space) and not is_image_space_channels_first(
+                wrap_with_vectranspose = is_image_space(env.observation_space) and is_image_space_channels_first(
                     env.observation_space
                 )
 

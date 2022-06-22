@@ -29,6 +29,7 @@ def log_ent_coef_update(
         log_prob = dist.log_prob(actions_pi)
 
         ent_coef = log_ent_coef.apply_fn({'params': ent_params})
+
         ent_coef_loss = -(ent_coef * (target_entropy + log_prob)).mean()
 
         return ent_coef_loss, {'ent_coef': ent_coef, 'ent_coef_loss': ent_coef_loss}
@@ -45,6 +46,7 @@ def sac_actor_update(
 
     observations: jnp.ndarray,
 ):
+    ent_coef = jnp.exp(log_ent_coef())
     dropout_key, _ = jax.random.split(rng)
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist = actor.apply_fn(
@@ -55,8 +57,6 @@ def sac_actor_update(
         )
         actions_pi = dist.sample(seed=rng)
         log_prob = dist.log_prob(actions_pi)
-
-        ent_coef = jnp.exp(log_ent_coef())
 
         q_values_pi = critic(observations, actions_pi, deterministic=False, rngs={"dropout": dropout_key})
         min_qf_pi = jnp.min(q_values_pi, axis=1)
@@ -116,7 +116,7 @@ def sac_critic_update(
         critic_loss = sum([jnp.mean((target_q_values - q_values[:, i, ...]) ** 2) for i in range(n_qs)])
         critic_loss = critic_loss / n_qs
 
-        return critic_loss, {'critic_loss': critic_loss, 'current_q': q_values.mean()}
+        return critic_loss, {'critic_loss': critic_loss, 'current_q': q_values.mean(), "n_qs": n_qs}
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info

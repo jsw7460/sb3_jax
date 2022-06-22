@@ -11,12 +11,7 @@ from stable_baselines3.common.noise import ActionNoise
 from offline_baselines_jax.common.buffers import ReplayBuffer
 from offline_baselines_jax.common.off_policy_algorithm import OffPolicyAlgorithm
 from offline_baselines_jax.common.policies import Model
-from offline_baselines_jax.common.type_aliases import (
-    GymEnv,
-    MaybeCallback,
-    Schedule,
-    Params
-)
+from offline_baselines_jax.common.type_aliases import GymEnv, MaybeCallback, Schedule, Params
 from offline_baselines_jax.sac.policies import SACPolicy
 from .core import sac_update
 
@@ -94,18 +89,6 @@ class SAC(OffPolicyAlgorithm):
         if _init_setup_model:
             self._setup_model()
 
-        # Entropy coefficient / Entropy temperature
-        # Inverse of the reward scale
-        self.ent_coef = ent_coef
-        self.target_update_interval = target_update_interval
-        self.entropy_update = True
-        self.latent_dim = None
-
-        self.observation_dim = -1
-        self.action_dim = -1
-        self.offline_data_normalizing = None
-
-
     def _setup_model(self) -> None:
         super(SAC, self)._setup_model()
         self._create_aliases()
@@ -173,9 +156,10 @@ class SAC(OffPolicyAlgorithm):
 
                     observations=replay_data.observations,
                     actions=replay_data.actions,
-                    rewards=replay_data.actions,
+                    rewards=replay_data.rewards,
                     next_observations=replay_data.next_observations,
                     dones=replay_data.dones,
+
                     gamma=self.gamma,
                     target_entropy=self.target_entropy,
                     tau=self.tau,

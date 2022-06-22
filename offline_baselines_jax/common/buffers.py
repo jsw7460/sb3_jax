@@ -1,24 +1,18 @@
-import time
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union, Callable, NamedTuple
-from numba import njit, prange
-import functools
+from typing import Any, Dict, List, Optional, Union, NamedTuple
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-# import stable_baselines.acktr.kfac_utils
 from gym import spaces
+from stable_baselines3.common.vec_env import VecNormalize
 
 from offline_baselines_jax.common.preprocessing import get_action_dim, get_obs_shape
 from offline_baselines_jax.common.type_aliases import (
     DictReplayBufferSamples,
     ReplayBufferSamples,
 )
-
-import jax
-import jax.numpy as jnp
-from stable_baselines3.common.vec_env import VecNormalize
-from copy import deepcopy
 
 try:
     # Check memory used by replay buffer when possible
@@ -41,7 +35,9 @@ class STermSubtrajRewardBufferSample(NamedTuple):
 
 @jax.jit
 def normal_sampling(key:Any, task_latents_mu: jnp.ndarray, task_latents_log_std:jnp.ndarray):
-    return task_latents_mu + jax.random.normal(key, shape=(task_latents_log_std.shape[-1], )) * jnp.exp(0.5 * task_latents_log_std)
+    return task_latents_mu \
+           + jax.random.normal(key, shape=(task_latents_log_std.shape[-1], )) \
+           * jnp.exp(0.5 * task_latents_log_std)
 
 
 class BaseBuffer(ABC):
@@ -470,69 +466,3 @@ class DictReplayBuffer(ReplayBuffer):
             rewards=self._normalize_reward(self.rewards[batch_inds, env_indices].reshape(-1, 1), env),
         )
 
-
-class TaskDictReplayBuffer(object):
-    def __init__(
-            self,
-            buffer_size: int,
-            observation_space: spaces.Space,
-            action_space: spaces.Space,
-            n_envs: int = 1,
-            optimize_memory_usage: bool = False,
-            handle_timeout_termination: bool = True,
-            num_tasks: int = 10,
-    ):
-        self.replay_buffers = []
-        self.num_tasks = num_tasks
-        for _ in range(num_tasks):
-            self.replay_buffers.append(DictReplayBuffer(buffer_size//num_tasks, observation_space, action_space,
-                                                        n_envs=n_envs, optimize_memory_usage=optimize_memory_usage,
-                                                        handle_timeout_termination=handle_timeout_termination,))
-
-    def add(
-            self,
-            obs: Dict[str, np.ndarray],
-            next_obs: Dict[str, np.ndarray],
-            action: np.ndarray,
-            reward: np.ndarray,
-            done: np.ndarray,
-            infos: List[Dict[str, Any]],
-            task_embeddings: Dict[str, np.ndarray] = None,
-    ) -> None:
-        self.replay_buffers[infos[0]['task']].add(obs, next_obs, action, reward, done, infos, task_embeddings)
-
-    def sample(self, batch_size: int, env: Optional[VecNormalize] = None) -> DictReplayBufferSamples:
-        """
-        Sample elements from the replay buffer.
-
-        :param batch_size: Number of element to sample
-        :param env: associated gym VecEnv
-            to normalize the observations/rewards when sampling
-        :return:
-        """
-        observations = {'task': [], 'obs': []}
-        actions = []
-        next_observations = {'task': [], 'obs': []}
-        rewards = []
-        dones = []
-        for i in range(self.num_tasks):
-            batch = self.replay_buffers[i].sample(batch_size//self.num_tasks, env)
-            for key, data in batch.observations.items():
-                observations[key].append(data)
-            actions.append(batch.actions)
-            for key, data in batch.next_observations.items():
-                next_observations[key].append(data)
-            rewards.append(batch.rewards)
-            dones.append(batch.dones)
-
-        for key, data in observations.items():
-            observations[key] = np.concatenate(data, axis=0)
-        for key, data in next_observations.items():
-            next_observations[key] = np.concatenate(data, axis=0)
-
-        actions = np.concatenate(actions, axis=0)
-        rewards = np.concatenate(rewards, axis=0)
-        dones = np.concatenate(dones, axis=0)
-
-        return DictReplayBufferSamples(observations=observations, actions=actions, next_observations=next_observations,
-                                       dones=dones, rewards=rewards)

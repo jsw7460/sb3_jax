@@ -334,8 +334,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                     break
                 for _ in range(gradient_steps):
                     callback.on_step()
-                # if log_interval is not None and self.num_timesteps % log_interval == 0:
-                #     self._dump_logs()
 
         callback.on_training_end()
         return self
@@ -346,6 +344,10 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             if k == "actor":
                 self.actor = v
                 self.policy.actor = v
+
+            elif k == "actor_target":
+                self.actor_target = v
+                self.policy.actor_target = v
 
             elif k == "critic":
                 self.critic = v
@@ -428,6 +430,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         if len(self.ep_info_buffer) > 0 and len(self.ep_info_buffer[0]) > 0:
             self.logger.record("rollout/ep_rew_mean", safe_mean([ep_info["r"] for ep_info in self.ep_info_buffer]))
             self.logger.record("rollout/ep_len_mean", safe_mean([ep_info["l"] for ep_info in self.ep_info_buffer]))
+            # Record current episode informations
+            self.logger.record("rollout/ep_rew_cur", self.ep_info_buffer[-1]["r"])
+            self.logger.record("rollout/ep_len_cur", self.ep_info_buffer[-1]["l"])
         self.logger.record("time/fps", fps)
         self.logger.record("time/time_elapsed", int(time_elapsed), exclude="tensorboard")
         self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
@@ -555,9 +560,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
         callback.on_rollout_start()
         continue_training = True
-
         while should_collect_more_steps(train_freq, num_collected_steps, num_collected_episodes):
-
             # Select action randomly or according to policy
             actions, buffer_actions = self._sample_action(learning_starts, action_noise, env.num_envs)
 

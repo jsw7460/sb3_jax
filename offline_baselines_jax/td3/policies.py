@@ -29,6 +29,7 @@ def sample_actions(
     observations: [np.ndarray, Dict],
     deterministic: bool,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+
     rng, dropout_key = jax.random.split(rng)
     rngs = {"dropout": dropout_key}
     action = actor_apply_fn({'params': actor_params}, observations, deterministic=deterministic, rngs=rngs)
