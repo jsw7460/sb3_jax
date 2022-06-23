@@ -1,10 +1,13 @@
-from typing import Dict, List, Tuple, Type, Union, Sequence, Any
+import math
+from typing import Dict, List, Tuple, Type, Union, Sequence, Any, Callable
 
 import flax
 import flax.linen as nn
 import gym
 import jax
 import jax.numpy as jnp
+from flax.linen.initializers import zeros
+from jax import lax
 
 from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.preprocessing import is_image_space
@@ -14,15 +17,93 @@ PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]
 Shape = Sequence[int]
 InfoDict = Dict[str, float]
+Dtype = Any  # this could be a real type?
+Array = Any
+PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]]
+
+default_kernel_init = nn.initializers.kaiming_uniform()
+default_bias_init = zeros
+
+
+def polyak_update(source: Model, target: Model, tau: float) -> Model:
+    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), source.params, target.params)
+    return target.replace(params=new_target_params)
 
 
 def default_init():
     return nn.initializers.kaiming_uniform()
 
 
-def polyak_update(source: Model, target: Model, tau: float) -> Model:
-    new_target_params = jax.tree_multimap(lambda p, tp: p * tau + tp * (1 - tau), source.params, target.params)
-    return target.replace(params=new_target_params)
+def calculate_gain(nonlinearity, param=None):
+    r"""Return the recommended gain value for the given nonlinearity function.
+    The values are as follows:
+
+    ================= ====================================================
+    nonlinearity      gain
+    ================= ====================================================
+    Linear / Identity :math:`1`
+    Conv{1,2,3}D      :math:`1`
+    Sigmoid           :math:`1`
+    Tanh              :math:`\frac{5}{3}`
+    ReLU              :math:`\sqrt{2}`
+    Leaky Relu        :math:`\sqrt{\frac{2}{1 + \text{negative\_slope}^2}}`
+    SELU              :math:`\frac{3}{4}`
+    ================= ====================================================
+
+    .. warning::
+        In order to implement `Self-Normalizing Neural Networks`_ ,
+        you should use ``nonlinearity='linear'`` instead of ``nonlinearity='selu'``.
+        This gives the initial weights a variance of ``1 / N``,
+        which is necessary to induce a stable fixed point in the forward pass.
+        In contrast, the default gain for ``SELU`` sacrifices the normalisation
+        effect for more stable gradient flow in rectangular layers.
+
+    Args:
+        nonlinearity: the non-linear function (`nn.functional` name)
+        param: optional parameter for the non-linear function
+
+    Examples:
+        >>> gain = nn.init.calculate_gain('leaky_relu', 0.2)  # leaky_relu with negative_slope=0.2
+
+    .. _Self-Normalizing Neural Networks: https://papers.nips.cc/paper/2017/hash/5d44ee6f2c3f71b73125876103c8f6c4-Abstract.html
+    """
+    linear_fns = ['linear', 'conv1d', 'conv2d', 'conv3d', 'conv_transpose1d', 'conv_transpose2d', 'conv_transpose3d']
+    if nonlinearity in linear_fns or nonlinearity == 'sigmoid':
+        return 1
+    elif nonlinearity == 'tanh':
+        return 5.0 / 3
+    elif nonlinearity == 'relu':
+        return math.sqrt(2.0)
+    elif nonlinearity == 'leaky_relu':
+        if param is None:
+            negative_slope = 0.01
+        elif not isinstance(param, bool) and isinstance(param, int) or isinstance(param, float):
+            # True/False are instances of int, hence check above
+            negative_slope = param
+        else:
+            raise ValueError("negative_slope {} not a valid number".format(param))
+        return math.sqrt(2.0 / (1 + negative_slope ** 2))
+    elif nonlinearity == 'selu':
+        return 3.0 / 4  # Value found empirically (https://github.com/pytorch/pytorch/pull/50664)
+    else:
+        raise ValueError("Unsupported nonlinearity {}".format(nonlinearity))
+
+
+def create_mlp(
+    output_dim: int,
+    net_arch: List[int],
+    activation_fn: Type[nn.Module] = nn.relu,
+    dropout: float = 0.0,
+    squash_output: bool = False,
+    layernorm: bool = False,
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init,
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
+) -> nn.Module:
+
+    if output_dim > 0:
+        net_arch = list(net_arch)
+        net_arch.append(output_dim)
+    return MLP(net_arch, activation_fn, dropout, squash_output, layernorm, kernel_init, bias_init)
 
 
 class Sequential(nn.Module):
@@ -87,24 +168,6 @@ class NatureCNN(BaseFeaturesExtractor):
         return x
 
 
-# class ModuleLayer(nn.Module):
-#     net_arch: List[int]
-#     activation_fn: Type[nn.Module] = nn.relu
-#     n_modules: int = 2
-#     last_activation: bool = False
-#
-#     @nn.compact
-#     def __call__(self, inputs: jnp.ndarray):
-#         VmapCritic = nn.vmap(MLP,
-#                              variable_axes={'params': 0},
-#                              split_rngs={'params': True},
-#                              in_axes=None,
-#                              out_axes=0,
-#                              axis_size=self.n_modules)
-#         qs = VmapCritic(self.net_arch, self.activation_fn, self.last_activation)(inputs)
-#         return qs
-
-
 class MLP(nn.Module):
     net_arch: List
     activation_fn: nn.Module
@@ -112,35 +175,22 @@ class MLP(nn.Module):
     squashed_out: bool = False
 
     layernorm: bool = False
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
 
     @nn.compact
     def __call__(self, x, deterministic: bool = False):
         for feature in self.net_arch[:-1]:
-            x = self.activation_fn(nn.Dense(feature, kernel_init=default_init())(x))
+            x = self.activation_fn(nn.Dense(feature, kernel_init=self.kernel_init)(x))
             x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
             if self.layernorm:
                 x = nn.LayerNorm()(x)
         if len(self.net_arch) > 0:
-            x = nn.Dense(self.net_arch[-1], kernel_init=default_init())(x)
+            x = nn.Dense(self.net_arch[-1], kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
         if self.squashed_out:
             return nn.tanh(x)
         else:
             return x
-
-
-def create_mlp(
-    output_dim: int,
-    net_arch: List[int],
-    activation_fn: Type[nn.Module] = nn.relu,
-    dropout: float = 0.0,
-    squash_output: bool = False,
-
-    layernorm: bool = False
-) -> nn.Module:
-    if output_dim > 0:
-        net_arch = list(net_arch)
-        net_arch.append(output_dim)
-    return MLP(net_arch, activation_fn, dropout, squash_output, layernorm)
 
 
 class CombinedExtractor(BaseFeaturesExtractor):
