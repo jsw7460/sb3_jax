@@ -30,11 +30,8 @@ def polyak_update(source: Model, target: Model, tau: float) -> Model:
     return target.replace(params=new_target_params)
 
 
-def default_init():
-    return nn.initializers.kaiming_uniform()
-
-
 def calculate_gain(nonlinearity, param=None):
+    # Code from pytorch api
     r"""Return the recommended gain value for the given nonlinearity function.
     The values are as follows:
 
@@ -106,6 +103,76 @@ def create_mlp(
     return MLP(net_arch, activation_fn, dropout, squash_output, layernorm, kernel_init, bias_init)
 
 
+def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> Tuple[List[int], List[int]]:
+    """
+    Get the actor and critic network architectures for off-policy actor-critic algorithms (SAC, TD3, DDPG).
+
+    The ``net_arch`` parameter allows to specify the amount and size of the hidden layers,
+    which can be different for the actor and the critic.
+    It is assumed to be a list of ints or a dict.
+
+    1. If it is a list, actor and critic networks will have the same architecture.
+        The architecture is represented by a list of integers (of arbitrary length (zero allowed))
+        each specifying the number of units per layer.
+       If the number of ints is zero, the network will be linear.
+    2. If it is a dict,  it should have the following structure:
+       ``dict(qf=[<critic network architecture>], pi=[<actor network architecture>])``.
+       where the network architecture is a list as described in 1.
+
+    For example, to have actor and critic that share the same network architecture,
+    you only need to specify ``net_arch=[256, 256]`` (here, two hidden layers of 256 units each).
+
+    If you want a different architecture for the actor and the critic,
+    then you can specify ``net_arch=dict(qf=[400, 300], pi=[64, 64])``.
+
+    .. note::
+        Compared to their on-policy counterparts, no shared layers (other than the features extractor)
+        between the actor and the critic are allowed (to prevent issues with target networks).
+
+    :param net_arch: The specification of the actor and critic networks.
+        See above for details on its formatting.
+    :return: The network architectures for the actor and the critic
+    """
+    try:
+        net_arch = list(net_arch)
+    except:
+        pass
+
+    if isinstance(net_arch, list):
+        actor_arch, critic_arch = net_arch, net_arch
+    else:
+        assert isinstance(net_arch, dict), "Error: the net_arch can only contain be a list of ints or a dict"
+        assert "pi" in net_arch, "Error: no key 'pi' was provided in net_arch for the actor network"
+        assert "qf" in net_arch, "Error: no key 'qf' was provided in net_arch for the critic network"
+        actor_arch, critic_arch = net_arch["pi"], net_arch["qf"]
+    return actor_arch, critic_arch
+
+
+class MLP(nn.Module):
+    net_arch: List
+    activation_fn: nn.Module
+    dropout: float = 0.0
+    squashed_out: bool = False
+
+    layernorm: bool = False
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
+    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
+
+    @nn.compact
+    def __call__(self, x, deterministic: bool = False):
+        for feature in self.net_arch[:-1]:
+            x = self.activation_fn(nn.Dense(feature, kernel_init=self.kernel_init)(x))
+            x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
+            if self.layernorm:
+                x = nn.LayerNorm()(x)
+        if len(self.net_arch) > 0:
+            x = nn.Dense(self.net_arch[-1], kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
+        if self.squashed_out:
+            return nn.tanh(x)
+        else:
+            return x
+
+
 class Sequential(nn.Module):
     layers: Sequence[nn.Module]
 
@@ -168,31 +235,6 @@ class NatureCNN(BaseFeaturesExtractor):
         return x
 
 
-class MLP(nn.Module):
-    net_arch: List
-    activation_fn: nn.Module
-    dropout: float = 0.0
-    squashed_out: bool = False
-
-    layernorm: bool = False
-    kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
-    bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
-
-    @nn.compact
-    def __call__(self, x, deterministic: bool = False):
-        for feature in self.net_arch[:-1]:
-            x = self.activation_fn(nn.Dense(feature, kernel_init=self.kernel_init)(x))
-            x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
-            if self.layernorm:
-                x = nn.LayerNorm()(x)
-        if len(self.net_arch) > 0:
-            x = nn.Dense(self.net_arch[-1], kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
-        if self.squashed_out:
-            return nn.tanh(x)
-        else:
-            return x
-
-
 class CombinedExtractor(BaseFeaturesExtractor):
     """
     Combined feature extractor for Dict observation spaces.
@@ -217,48 +259,3 @@ class CombinedExtractor(BaseFeaturesExtractor):
                 # The observation key is a vector, flatten it if needed
                 encoded_tensor_list.append(observation[key].reshape((observation[key].shape[0], -1)))
         return jnp.concatenate(encoded_tensor_list, axis=1)
-
-
-def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> Tuple[List[int], List[int]]:
-    """
-    Get the actor and critic network architectures for off-policy actor-critic algorithms (SAC, TD3, DDPG).
-
-    The ``net_arch`` parameter allows to specify the amount and size of the hidden layers,
-    which can be different for the actor and the critic.
-    It is assumed to be a list of ints or a dict.
-
-    1. If it is a list, actor and critic networks will have the same architecture.
-        The architecture is represented by a list of integers (of arbitrary length (zero allowed))
-        each specifying the number of units per layer.
-       If the number of ints is zero, the network will be linear.
-    2. If it is a dict,  it should have the following structure:
-       ``dict(qf=[<critic network architecture>], pi=[<actor network architecture>])``.
-       where the network architecture is a list as described in 1.
-
-    For example, to have actor and critic that share the same network architecture,
-    you only need to specify ``net_arch=[256, 256]`` (here, two hidden layers of 256 units each).
-
-    If you want a different architecture for the actor and the critic,
-    then you can specify ``net_arch=dict(qf=[400, 300], pi=[64, 64])``.
-
-    .. note::
-        Compared to their on-policy counterparts, no shared layers (other than the features extractor)
-        between the actor and the critic are allowed (to prevent issues with target networks).
-
-    :param net_arch: The specification of the actor and critic networks.
-        See above for details on its formatting.
-    :return: The network architectures for the actor and the critic
-    """
-    try:
-        net_arch = list(net_arch)
-    except:
-        pass
-
-    if isinstance(net_arch, list):
-        actor_arch, critic_arch = net_arch, net_arch
-    else:
-        assert isinstance(net_arch, dict), "Error: the net_arch can only contain be a list of ints or a dict"
-        assert "pi" in net_arch, "Error: no key 'pi' was provided in net_arch for the actor network"
-        assert "qf" in net_arch, "Error: no key 'qf' was provided in net_arch for the critic network"
-        actor_arch, critic_arch = net_arch["pi"], net_arch["qf"]
-    return actor_arch, critic_arch
