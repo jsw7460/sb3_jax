@@ -128,7 +128,7 @@ class Critic(nn.Module):
 class TD3Policy(object):
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -142,7 +142,7 @@ class TD3Policy(object):
         self.observation_space = observation_space
         self.action_space = action_space
 
-        self.rng, actor_key, critic_key, features_key, dropout_key = jax.random.split(key, 5)
+        self.rng, actor_key, critic_key, features_key, dropout_key = jax.random.split(rng, 5)
 
         # Default network architecture, from the original paper
         if net_arch is None:
@@ -278,7 +278,7 @@ class CnnPolicy(TD3Policy):
 
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -289,7 +289,7 @@ class CnnPolicy(TD3Policy):
         n_critics: int = 2,
     ):
         super(CnnPolicy, self).__init__(
-            key,
+            rng,
             observation_space,
             action_space,
             lr_schedule,
@@ -326,7 +326,7 @@ class MultiInputPolicy(TD3Policy):
 
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Dict,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -337,7 +337,7 @@ class MultiInputPolicy(TD3Policy):
         n_critics: int = 2,
     ):
         super(MultiInputPolicy, self).__init__(
-            key,
+            rng,
             observation_space,
             action_space,
             lr_schedule,

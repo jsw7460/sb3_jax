@@ -42,11 +42,9 @@ def is_image_space(
         # Check the type
         if observation_space.dtype != np.uint8:
             return False
-
         # Check the value range
         if np.any(observation_space.low != 0) or np.any(observation_space.high != 255):
             return False
-
         # Skip channels check
         if not check_channels:
             return True

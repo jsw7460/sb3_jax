@@ -144,7 +144,7 @@ class SAC(OffPolicyAlgorithm):
             replay_data = self.replay_buffer.sample(batch_size=batch_size)
 
             self.rng, key = jax.random.split(self.rng, 2)
-            target_update_cond = gradient_step % self.target_update_interval == 0
+            target_update_cond = (gradient_step % self.target_update_interval == 0)
 
             self.rng, new_models, info \
                 = sac_update(

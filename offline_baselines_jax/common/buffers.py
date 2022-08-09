@@ -21,18 +21,6 @@ except ImportError:
     psutil = None
 
 
-class STermSubtrajRewardBufferSample(NamedTuple):
-    observations: np.ndarray
-    actions: np.ndarray
-    next_observations: np.ndarray
-    rewards: np.ndarray
-    dones: np.ndarray
-    history_observations: np.ndarray
-    history_actions: np.ndarray
-    st_future_observations: np.ndarray
-    st_future_actions: np.ndarray
-
-
 @jax.jit
 def normal_sampling(key:Any, task_latents_mu: jnp.ndarray, task_latents_log_std:jnp.ndarray):
     return task_latents_mu \

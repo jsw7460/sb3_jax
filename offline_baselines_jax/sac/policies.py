@@ -20,6 +20,7 @@ from offline_baselines_jax.common.jax_layers import (
 from offline_baselines_jax.common.policies import Model
 from offline_baselines_jax.common.preprocessing import get_action_dim, preprocess_obs
 from offline_baselines_jax.common.type_aliases import Schedule, Params
+from offline_baselines_jax.common.utils import get_basic_rngs
 
 tfd = tfp.distributions
 tfb = tfp.bijectors
@@ -74,6 +75,7 @@ class Actor(nn.Module):
         deterministic: bool = False,
         **kwargs,
     ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+
         observations = preprocess_obs(observations, self.observation_space)
         features = self.features_extractor(observations, **kwargs)
 
@@ -103,7 +105,7 @@ class SingleCritic(nn.Module):
         self.q_net = create_mlp(
             output_dim=1,
             net_arch=self.net_arch,
-            dropout=self.dropout
+            dropout=self.dropout,
         )
 
     def __call__(self, *args, **kwargs):
@@ -135,8 +137,8 @@ class Critic(nn.Module):
         batch_qs = nn.vmap(
             SingleCritic,
             in_axes=None,
-            out_axes=1,     # 1
-            variable_axes={"params": 1},        # 1
+            out_axes=1,
+            variable_axes={"params": 1, "batch_stats": 1},
             split_rngs={"params": True, "dropout": True},
             axis_size=self.n_critics
         )
@@ -159,7 +161,7 @@ class Critic(nn.Module):
 class SACPolicy(object):
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -173,7 +175,7 @@ class SACPolicy(object):
         self.observation_space = observation_space
         self.action_space = action_space
 
-        self.rng, actor_key, critic_key, features_key, dropout_key = jax.random.split(key, 5)
+        self.rng, actor_key, critic_key, features_key, dropout_key = jax.random.split(rng, 5)
 
         if net_arch is None:
             if features_extractor_class == NatureCNN:
@@ -188,7 +190,6 @@ class SACPolicy(object):
             _observation_space=observation_space,
             **features_extractor_kwargs
         )
-
         actor_arch, critic_arch = get_actor_critic_arch(net_arch)
         actor_def = Actor(
             features_extractor=features_extractor_def,
@@ -217,17 +218,16 @@ class SACPolicy(object):
             observation = observation_space.sample()[np.newaxis, ...]
         action = action_space.sample()[np.newaxis, ...]
 
-        actor_rngs = {"params": actor_key, "dropout": dropout_key}
+        self.rng, actor_rngs = get_basic_rngs(self.rng)
         actor = Model.create(actor_def, inputs=[actor_rngs, observation], tx=optax.adam(learning_rate=lr_schedule))
 
-        critic_rngs = {"params": critic_key, "dropout": dropout_key}
+        self.rng, critic_rngs = get_basic_rngs(self.rng)
         critic = Model.create(
             critic_def,
             inputs=[critic_rngs, observation, action],
             tx=optax.adam(learning_rate=lr_schedule)
         )
         critic_target = Model.create(critic_def, inputs=[critic_rngs, observation, action])
-
         self.actor = actor
         self.critic, self.critic_target = critic, critic_target
 
@@ -237,7 +237,7 @@ class SACPolicy(object):
         self.rng = rng
         return np.asarray(actions)
 
-    def predict(self, observation: jnp.ndarray, deterministic: bool = True) -> np.ndarray:
+    def predict(self, observation: jnp.ndarray, deterministic: bool = True, **kwargs) -> np.ndarray:
         actions = self._predict(observation, deterministic)
         if isinstance(self.action_space, gym.spaces.Box):
             # Actions could be on arbitrary scale, so clip the actions to avoid
@@ -300,7 +300,7 @@ class CnnPolicy(SACPolicy):
 
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -312,7 +312,7 @@ class CnnPolicy(SACPolicy):
         dropout: float = 0.0,
     ):
         super(CnnPolicy, self).__init__(
-            key,
+            rng,
             observation_space,
             action_space,
             lr_schedule,
@@ -357,7 +357,7 @@ class MultiInputPolicy(SACPolicy):
 
     def __init__(
         self,
-        key,
+        rng,
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: Schedule,
@@ -369,7 +369,7 @@ class MultiInputPolicy(SACPolicy):
         dropout: float = 0.0,
     ):
         super(MultiInputPolicy, self).__init__(
-            key,
+            rng,
             observation_space,
             action_space,
             lr_schedule,

@@ -98,7 +98,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         without_exploration: bool = False,
         dropout: float = 0.0,
     ):
-
         super(OffPolicyAlgorithm, self).__init__(
             policy=policy,
             env=env,
@@ -186,13 +185,13 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 **self.replay_buffer_kwargs,
             )
 
-        self.rng, key = jax.random.split(self.rng, 2)
-        self.policy = self.policy_class(  # pytype:disable=not-instantiable
-            key=key,
+        self.rng, rng = jax.random.split(self.rng, 2)
+        self.policy = self.policy_class(
+            rng=rng,
             observation_space=self.observation_space,
             action_space=self.action_space,
             lr_schedule=self.lr_schedule,
-            **self.policy_kwargs,  # pytype:disable=not-instantiable
+            **self.policy_kwargs,
         )
         # Convert train freq parameter to TrainFreq object
         self._convert_train_freq()
@@ -330,8 +329,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 # Special case when the user passes `gradient_steps=0`
                 if gradient_steps > 0:
                     self.offline_train(batch_size=self.batch_size, gradient_steps=gradient_steps)
-                else:
-                    break
+                else: break
                 for _ in range(gradient_steps):
                     callback.on_step()
 
@@ -369,9 +367,6 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
     def offline_train(self, gradient_steps: int, batch_size: int) -> None:
         raise NotImplementedError()
-
-    def get_predict_input(self, observations: np.ndarray):
-        return observations
 
     def _sample_action(
         self,
@@ -550,6 +545,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
         assert isinstance(env, VecEnv), "You must pass a VecEnv"
         assert train_freq.frequency > 0, "Should at least collect one step or episode."
+        assert not self.without_exploration
 
         if env.num_envs > 1:
             assert train_freq.unit == TrainFrequencyUnit.STEP, "You must use only one env when doing episodic training."

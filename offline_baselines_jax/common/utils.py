@@ -6,6 +6,8 @@ from collections import deque
 from itertools import zip_longest
 from typing import Dict, Iterable, Optional, Tuple, Union
 
+import jax.numpy as jnp
+
 import gym
 import jax
 import numpy as np
@@ -33,6 +35,12 @@ def set_random_seed(seed: int) -> None:
     random.seed(seed)
     # Seed numpy RNG
     np.random.seed(seed)
+
+
+def get_basic_rngs(rng: jnp.ndarray) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+    rng, param_key, dropout_key, batch_key = jax.random.split(rng, 4)
+    return rng, {"params": param_key, "dropout": dropout_key, "batch_stats": batch_key}
+
 
 # From stable baselines
 def explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> np.ndarray:

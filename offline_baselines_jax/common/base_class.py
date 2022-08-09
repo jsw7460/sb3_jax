@@ -158,6 +158,9 @@ class BaseAlgorithm(ABC):
             if policy in ["MlpPolicy", "CnnPolicy"] and isinstance(self.observation_space, gym.spaces.Dict):
                 raise ValueError(f"You must use `MultiInputPolicy` when working with dict observation space, not {policy}")
 
+    @property
+    def last_obs(self):
+        return self._last_obs.copy()
 
     @staticmethod
     def _wrap_env(env: GymEnv, verbose: int = 0, monitor_wrapper: bool = True) -> VecEnv:

@@ -16,20 +16,16 @@ def log_ent_coef_update(
     rng:Any,
     log_ent_coef: Model,
     actor: Model,
-
     observations: jnp.ndarray,
-
     target_entropy: float,
 ) -> Tuple[Model, InfoDict]:
     dropout_key, _ = jax.random.split(rng)
+    dist = actor(observations, deterministic=False, rngs={"dropout": dropout_key})
+    actions_pi = dist.sample(seed=rng)
+    log_prob = dist.log_prob(actions_pi)
 
     def temperature_loss_fn(ent_params: Params):
-        dist = actor(observations, deterministic=False, rngs={"dropout": dropout_key})
-        actions_pi = dist.sample(seed=rng)
-        log_prob = dist.log_prob(actions_pi)
-
         ent_coef = log_ent_coef.apply_fn({'params': ent_params})
-
         ent_coef_loss = -(ent_coef * (target_entropy + log_prob)).mean()
 
         return ent_coef_loss, {'ent_coef': ent_coef, 'ent_coef_loss': ent_coef_loss}
@@ -48,6 +44,7 @@ def sac_actor_update(
 ):
     ent_coef = jnp.exp(log_ent_coef())
     dropout_key, _ = jax.random.split(rng)
+
     def actor_loss_fn(actor_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         dist = actor.apply_fn(
             {'params': actor_params},
@@ -94,6 +91,7 @@ def sac_critic_update(
     next_q_values = jnp.min(next_q_values, axis=1)
 
     ent_coef = jnp.exp(log_ent_coef())
+
     # add entropy term
     next_q_values = next_q_values - ent_coef * next_log_prob.reshape(-1, 1)
     # td error + entropy term
@@ -102,7 +100,7 @@ def sac_critic_update(
     def critic_loss_fn(critic_params: Params) -> Tuple[jnp.ndarray, InfoDict]:
         # Get current Q-values estimates for each critic network
         # using action from the replay buffer
-        q_values= critic.apply_fn(
+        q_values = critic.apply_fn(
             {'params': critic_params},
             observations,
             actions,
@@ -120,7 +118,6 @@ def sac_critic_update(
 
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     return new_critic, info
-
 
 
 @functools.partial(jax.jit, static_argnames=('gamma', 'target_entropy', 'tau', 'target_update_cond', 'entropy_update'))

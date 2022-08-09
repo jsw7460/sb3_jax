@@ -21,7 +21,7 @@ Dtype = Any  # this could be a real type?
 Array = Any
 PrecisionLike = Union[None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]]
 
-default_kernel_init = nn.initializers.kaiming_uniform()
+default_kernel_init = nn.initializers.xavier_normal()
 default_bias_init = zeros
 
 
@@ -31,7 +31,6 @@ def polyak_update(source: Model, target: Model, tau: float) -> Model:
 
 
 def calculate_gain(nonlinearity, param=None):
-    # Code from pytorch api
     r"""Return the recommended gain value for the given nonlinearity function.
     The values are as follows:
 
@@ -60,7 +59,7 @@ def calculate_gain(nonlinearity, param=None):
         param: optional parameter for the non-linear function
 
     Examples:
-        >>> gain = nn.init.calculate_gain('leaky_relu', 0.2)  # leaky_relu with negative_slope=0.2
+        >>> gain = calculate_gain('leaky_relu', 0.2)  # leaky_relu with negative_slope=0.2
 
     .. _Self-Normalizing Neural Networks: https://papers.nips.cc/paper/2017/hash/5d44ee6f2c3f71b73125876103c8f6c4-Abstract.html
     """
@@ -89,10 +88,12 @@ def calculate_gain(nonlinearity, param=None):
 def create_mlp(
     output_dim: int,
     net_arch: List[int],
-    activation_fn: Type[nn.Module] = nn.relu,
+    activation_fn: Callable = nn.relu,
     dropout: float = 0.0,
     squash_output: bool = False,
     layernorm: bool = False,
+    batchnorm: bool = False,
+    use_bias: bool = True,
     kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init,
     bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
 ) -> nn.Module:
@@ -100,7 +101,7 @@ def create_mlp(
     if output_dim > 0:
         net_arch = list(net_arch)
         net_arch.append(output_dim)
-    return MLP(net_arch, activation_fn, dropout, squash_output, layernorm, kernel_init, bias_init)
+    return MLP(net_arch, activation_fn, dropout, squash_output, layernorm, batchnorm, use_bias, kernel_init, bias_init)
 
 
 def get_actor_critic_arch(net_arch: Union[List[int], Dict[str, List[int]]]) -> Tuple[List[int], List[int]]:
@@ -155,22 +156,31 @@ class MLP(nn.Module):
     squashed_out: bool = False
 
     layernorm: bool = False
+    batchnorm: bool = False
+    use_bias: bool = True
     kernel_init: Callable[[PRNGKey, Shape, Dtype], Array] = default_kernel_init
     bias_init: Callable[[PRNGKey, Shape, Dtype], Array] = zeros
 
     @nn.compact
-    def __call__(self, x, deterministic: bool = False):
+    def __call__(self, x, deterministic: bool = False, training: bool = True):
+
         for feature in self.net_arch[:-1]:
-            x = self.activation_fn(nn.Dense(feature, kernel_init=self.kernel_init)(x))
+            x = nn.Dense(feature, kernel_init=self.kernel_init, use_bias=self.use_bias, bias_init=self.bias_init)(x)
+            if self.batchnorm: x = nn.BatchNorm(use_running_average=not training, momentum=0.1)(x)
+            if self.layernorm: x = nn.LayerNorm()(x)
+            x = self.activation_fn(x)
             x = nn.Dropout(rate=self.dropout)(x, deterministic=deterministic)
-            if self.layernorm:
-                x = nn.LayerNorm()(x)
+
         if len(self.net_arch) > 0:
-            x = nn.Dense(self.net_arch[-1], kernel_init=self.kernel_init, bias_init=self.bias_init)(x)
-        if self.squashed_out:
-            return nn.tanh(x)
-        else:
-            return x
+            x = nn.Dense(
+                self.net_arch[-1],
+                kernel_init=self.kernel_init,
+                use_bias=self.use_bias,
+                bias_init=self.bias_init
+            )(x)
+
+        if self.squashed_out: return nn.tanh(x)
+        else: return x
 
 
 class Sequential(nn.Module):
